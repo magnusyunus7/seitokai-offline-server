@@ -10,7 +10,7 @@ This is a personal preservation project, not affiliated with the publisher. It c
 
 The server needs the game's package name (for example `jp.interactive_studio.<name>`). It sets the `package` key in `fake_config.json`, the CDN path, and the data folder on the device. Any one of these finds it:
 
-1. **List the installed games** on the emulator. Install the game first, then run this from the LDPlayer folder (add `-s emulator-5554` after `adb.exe` if several instances are running):
+1. **List the installed games** on the emulator. Install the game first, then run this from the LDPlayer folder (add `-s <serial>` after `adb.exe` if several instances are running; get the serial from `.\adb.exe devices`):
    ```powershell
    .\adb.exe shell pm list packages -3 | Select-String interactive_studio
    ```
