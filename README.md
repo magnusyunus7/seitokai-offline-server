@@ -6,6 +6,50 @@ This is a personal preservation project, not affiliated with the publisher. It c
 
 ###### Actively testing all the games, further generalization will be implemented if needed
 
+## What it does
+
+- Answers the game's API host itself and never forwards those requests to the real server, so nothing you do reaches a real account.
+  - API: `api.drama-prod.interactive-studio.jp` (`/oauth/token` and `/api`, MessagePack bodies)
+  - CDN: `cdn.drama-prod.interactive-studio.jp/<package>/<uuid>`
+- Learns the server's replies from every `*.flow` recording in its folder, including the CDN file bodies inside them.
+- Serves the game's files from local folders, by hash. If a file is missing, it can fetch it once from the real CDN and keep it (see **The real-CDN fallback**).
+- Keeps progress, balances and purchases in `fake_state.json`.
+- Blocks the ad network, so ad buttons show the game's own "no ads available" message instead of loading forever.
+- Passes everything else (analytics, Google, and so on) through unchanged.
+
+## Requirements
+
+- Windows PC, LDPlayer 9 (rooted, ADB on) with the mitmproxy CA installed as a **system** certificate
+- Python 3 in a virtual environment: `pip install -r requirements.txt`
+- Run `mitmweb` from the venv. The standalone Windows mitmproxy build has its own bundled Python and cannot see packages installed in the venv.
+- The Play Store build of the game, installed unmodified
+
+## Known limits
+
+- **The fallback is always on.** The server fetches any file it lacks from the real CDN when it can, so a run that works today may be using the real CDN without you noticing. Each `cdn MISSING ... -> real CDN` line in the terminal is a file that is not stored locally yet.
+- The fallback stops working when the CDN is shut down. Only files you already downloaded or cached are available after that.
+- **No patched APK.** The game checks that it was installed from Google Play. A re-signed, unmodified rebuild already refuses to start ("get it on Google Play"), so redirecting the app to another server by repackaging it does not work. Do not expect a standalone APK from this project.
+- Phone play needs a rooted phone, with the mitmproxy CA as a system certificate and the two game hostnames redirected to the server. This has not been tested.
+
+## Folder layout (runtime)
+
+The script finds its data relative to its own folder, so keep this layout. Items in ****bold**** are not in git.
+
+```
+new_version/
+  captures/
+    fake_server.py          the add-on
+    fake_config.json        package, balances, data folder
+    **fake_state.json**     created at runtime: saves, balances, purchases
+    **<name>.flow**         your recordings (contain your login token)
+    **old_flows/**          recordings kept but ignored
+    **cdn_extra/**          CDN files recovered from recordings or the real CDN
+  **snapshots/<snap>/external/data/<package>/**   game files pulled from a device
+  **gamedata/external/data/<package>/**           optional older pull
+```
+
+If `data_dir` in the config is empty, the script picks the folder with the most files among `gamedata` and `snapshots`. With more than one game or snapshot, set `data_dir` explicitly.
+
 ## Finding a game's package name
 
 The server needs the game's package name (for example `jp.interactive_studio.<name>`). It sets the `package` key in `fake_config.json`, the CDN path, and the data folder on the device. Any one of these finds it:
@@ -32,60 +76,40 @@ Then set it in the config, and set `data_dir` to the matching snapshot folder:
 { "package": "jp.interactive_studio.<name>" }
 ```
 
----
+## Before you start: record a first launch (required)
 
-## What it does
+The server answers the game's API only from your own recordings. Without a recording of a real first launch, the game cannot log in or get its profile, chapter list or file URLs, so this step cannot be skipped. You need it once per game, and it has to be done while the real server is still up.
 
-- Answers the game's API host itself and never forwards those requests to the real server, so nothing you do reaches a real account.
-  - API: `api.drama-prod.interactive-studio.jp` (`/oauth/token` and `/api`, MessagePack bodies)
-  - CDN: `cdn.drama-prod.interactive-studio.jp/<package>/<uuid>`
-- Learns the server's replies from every `*.flow` recording in its folder, including the CDN file bodies inside them.
-- Serves the game's files from local folders, by hash. If a file is missing, it can fetch it once from the real CDN and keep it (see **The real-CDN fallback**).
-- Keeps progress, balances and purchases in `fake_state.json`.
-- Blocks the ad network, so ad buttons show the game's own "no ads available" message instead of loading forever.
-- Passes everything else (analytics, Google, and so on) through unchanged.
-
-## What is emulated
-
-| Area | Commands | Behaviour |
-|---|---|---|
-| Login | `/oauth/token` | Replays the recorded token reply |
-| Profile | `050001` | Recorded reply, with `ticket`, `ruby`, `point` overridden from the config and adjusted by the state file |
-| Cloud save | `050005`, `050004` | Saves are stored per slot; the game's position comes from the saved `data` blob |
-| Chapter start | `050008` | Progress only moves forward. A chapter costs its listed tickets once, then replays are free |
-| Premium choices | `080001`, `080002` | Price comes from the `080001` row; bought choices are remembered and flagged as owned |
-| Exchange | `060004` | Points to rubies or tickets, tracked in the state file |
-| Slot machine | `013001` | Point rewards are tracked in the state file |
-| Language | `070001`, `070002` | Per-language text packs replayed from recordings (English recorded) |
-| File URLs | `020002` | Recorded URLs are reused; for unseen hashes, URLs pointing back at this server are invented |
-| Ads | host block, `050018` | Ad hosts are blocked; the reward claim returns `False` |
-| Anything else | | Replays the last recorded reply, or prints `UNKNOWN command` |
-
-## Requirements
-
-- Windows PC, LDPlayer 9 (rooted, ADB on) with the mitmproxy CA installed as a **system** certificate
-- Python 3 in a virtual environment: `pip install -r requirements.txt`
-- Run `mitmweb` from the venv. The standalone Windows mitmproxy build has its own bundled Python and cannot see packages installed in the venv.
-- The Play Store build of the game, installed unmodified
-
-## Folder layout (runtime)
-
-The script finds its data relative to its own folder, so keep this layout. Items in **bold** are not in git.
-
+1. Install the game on the emulator and set up the proxy (see **Requirements**).
+2. In the `captures` folder, start a plain recording, without the add-on:
+```powershell
+   mitmweb --listen-port 8080 -w <name>.flow
 ```
-new_version/
-  captures/
-    fake_server.py          the add-on
-    fake_config.json        package, balances, data folder
-    **fake_state.json**     created at runtime: saves, balances, purchases
-    **<name>.flow**         your recordings (contain your login token)
-    **old_flows/**          recordings kept but ignored
-    **cdn_extra/**          CDN files recovered from recordings or the real CDN
-  **snapshots/<snap>/external/data/<package>/**   game files pulled from a device
-  **gamedata/external/data/<package>/**           optional older pull
+3. Open the game and pick a language. Let every initial download finish, then play into the first chapter. If the account has already progressed, use the game's **restart story** option, which makes it download the early chapters again.
+4. Close the game, then press Ctrl+C in the terminal so the file saves.
+5. Pull the game's data folder from the device (`adb pull`) into `snapshots/`, so the downloaded files are also kept locally.
+6. Set `package` in `fake_config.json` and start the server (see **Daily use**).
+
+The recording contains your login token and account ID, so keep it private and never share it. After this, files you have not downloaded yet can be filled in by the CDN fallback while the real CDN is up.
+
+## Configuration
+
+`fake_config.json`
+
+```json
+{
+ "data_dir": "",
+ "ticket": 99999,
+ "ruby": 99999,
+ "point": 99999,
+ "package": "jp.interactive_studio.<name>"
+}
 ```
 
-If `data_dir` in the config is empty, the script picks the folder with the most files among `gamedata` and `snapshots`. With more than one game or snapshot, set `data_dir` explicitly.
+- `data_dir`: game files folder. Empty means auto-detect.
+- `ticket`, `ruby`, `point`: starting balances. `null` means use whatever was recorded.
+- `package`: the game's package name. Defaults to `jp.interactive_studio.seitokai` if missing.
+- Edits take effect after restarting mitmweb.
 
 ## Daily use
 
@@ -119,28 +143,25 @@ cd C:\LDPlayer\LDPlayer9
 
 Taking a snapshot of a device is the same copy in the other direction (`adb pull`).
 
-## Configuration
+## What is emulated
 
-`fake_config.json`
-
-```json
-{
- "data_dir": "",
- "ticket": 99999,
- "ruby": 99999,
- "point": 99999,
- "package": "jp.interactive_studio.<name>"
-}
-```
-
-- `data_dir`: game files folder. Empty means auto-detect.
-- `ticket`, `ruby`, `point`: starting balances. `null` means use whatever was recorded.
-- `package`: the game's package name. Defaults to `jp.interactive_studio.seitokai` if missing.
-- Edits take effect after restarting mitmweb.
+| Area | Commands | Behaviour |
+|---|---|---|
+| Login | `/oauth/token` | Replays the recorded token reply |
+| Profile | `050001` | Recorded reply, with `ticket`, `ruby`, `point` overridden from the config and adjusted by the state file |
+| Cloud save | `050005`, `050004` | Saves are stored per slot; the game's position comes from the saved `data` blob |
+| Chapter start | `050008` | Progress only moves forward. A chapter costs its listed tickets once, then replays are free |
+| Premium choices | `080001`, `080002` | Price comes from the `080001` row; bought choices are remembered and flagged as owned |
+| Exchange | `060004` | Points to rubies or tickets, tracked in the state file |
+| Slot machine | `013001` | Point rewards are tracked in the state file |
+| Language | `070001`, `070002` | Per-language text packs replayed from recordings (English recorded) |
+| File URLs | `020002` | Recorded URLs are reused; for unseen hashes, URLs pointing back at this server are invented |
+| Ads | host block, `050018` | Ad hosts are blocked; the reward claim returns `False` |
+| Anything else | | Replays the last recorded reply, or prints `UNKNOWN command` |
 
 ## The real-CDN fallback
 
-When the game asks the CDN for a file the server does not have, the server can forward that one request to the real CDN, keep the reply, and serve it from local storage from then on. This is a safety net for gaps in your recordings, and it is the one case where the server talks to the real internet.
+When the game asks the CDN for a file the server does not have, the server can forward that one request to the real CDN, keep the reply, and serve it from local storage from then on. This is a safety net for gaps in your recordings, and it is the one case where the server talks to the real internet. It does not replace the first-launch recording, which is required (see **Before you start**).
 
 **How a CDN request is answered, in order:**
 
@@ -183,6 +204,16 @@ Displayed balance = config value, minus spent, plus earned, never below 0.
 
 To jump to a chapter: stop the server, set `chapter_id` in the save, and set `"chapterId":"ChN"` and `"commandId":null` inside the `data` string to match. Keep a backup first.
 
+## Recording what is missing
+
+Everything the fake server knows came from real sessions recorded while the real server was still up. To fill a gap:
+
+1. In an emulator instance with the game's data cleared, run `mitmweb --listen-port 8080 -w <name>.flow` (without the script).
+2. Play the part that is missing. Let every download finish.
+3. Stop mitmweb with Ctrl+C so the file saves. Move it into `captures`.
+
+The first-launch recording is covered in **Before you start**. The same method fills later gaps: record the part that's missing, then pull the data folder again.
+
 ## Troubleshooting
 
 | Symptom | Likely cause and fix |
@@ -195,32 +226,6 @@ To jump to a chapter: stop the server, set `chapter_id` in the save, and set `"c
 | Game returns to chapter 1 after closing | The saved chapter was overwritten. `050008` must only move progress forward, and `chapter_id` in the save must match the `data` blob |
 | Ad button loops forever | The ad hosts are not being blocked. Restart mitmweb and the game |
 | Game restarts at the language screen | Normal after clearing the app's data. Pick the same language |
-
-## Recording what is missing
-
-Everything the fake server knows came from real sessions recorded while the real server was still up. To fill a gap:
-
-1. In an emulator instance with the game's data cleared, run `mitmweb --listen-port 8080 -w <name>.flow` (without the script).
-2. Play the part that is missing. Let every download finish.
-3. Stop mitmweb with Ctrl+C so the file saves. Move it into `captures`.
-
-A first-launch recording is needed for the language screen and the initial downloads. The game's "restart story" option makes it download the early chapters again. Pull the game's data folder from the device afterwards, so the files are also in a snapshot.
-
-## Known limits
-
-- **The fallback is always on.** The server fetches any file it lacks from the real CDN when it can, so a run that works today may be using the real CDN without you noticing. Each `cdn MISSING ... -> real CDN` line in the terminal is a file that is not stored locally yet.
-- The fallback stops working when the CDN is shut down. Only files you already downloaded or cached are available after that.
-- **No patched APK.** The game checks that it was installed from Google Play. A re-signed, unmodified rebuild already refuses to start ("get it on Google Play"), so redirecting the app to another server by repackaging it does not work. Do not expect a standalone APK from this project.
-- Phone play needs a rooted phone, with the mitmproxy CA as a system certificate and the two game hostnames redirected to the server. This has not been tested.
-
-## Reverse-engineering notes
-
-- Engine: Unity IL2CPP, arm64 only. The base APK holds `global-metadata.dat`; the split APK holds `libil2cpp.so`. Tools: Il2CppDumper, Ghidra with the dumper's script.
-- Network code: the API client is `FPPOOLFBDBH`, built by `IFCJFFGGLME`. The URL comes from `BPODNMBNGML`, which keeps its strings as encrypted byte arrays and decrypts them with a repeating-key XOR (key array of 128 bytes, in the same file).
-- In `global-metadata.dat` of this build: key array at offset 6057576, API URL array at 6078176 (48 bytes), OAuth URL array at 6078344 (56 bytes).
-- API: MessagePack. A request is a list of command objects (`{"id": "050001", ...}`) and the reply is a dict keyed by command ID.
-- Game catalog: `drama.dat` (a header, then a raw deflate stream from byte 31) lists file hashes in chapter order. The first 8 entries are shared files. It lists 376 hashes, and the server's `020002` list covers about 1,121.
-- Ads: LevelPlay (ironSource) through Unity mediation.
 
 ## Doing this for another game from the same studio
 
@@ -246,3 +251,12 @@ gamedata/
 *.so
 *.dat
 ```
+
+## Reverse-engineering notes
+
+- Engine: Unity IL2CPP, arm64 only. The base APK holds `global-metadata.dat`; the split APK holds `libil2cpp.so`. Tools: Il2CppDumper, Ghidra with the dumper's script.
+- Network code: the API client is `FPPOOLFBDBH`, built by `IFCJFFGGLME`. The URL comes from `BPODNMBNGML`, which keeps its strings as encrypted byte arrays and decrypts them with a repeating-key XOR (key array of 128 bytes, in the same file).
+- In `global-metadata.dat` of this build: key array at offset 6057576, API URL array at 6078176 (48 bytes), OAuth URL array at 6078344 (56 bytes).
+- API: MessagePack. A request is a list of command objects (`{"id": "050001", ...}`) and the reply is a dict keyed by command ID.
+- Game catalog: `drama.dat` (a header, then a raw deflate stream from byte 31) lists file hashes in chapter order. The first 8 entries are shared files. It lists 376 hashes, and the server's `020002` list covers about 1,121.
+- Ads: LevelPlay (ironSource) through Unity mediation.
