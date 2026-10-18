@@ -33,7 +33,21 @@ API_HOST = "api.drama-prod.interactive-studio.jp"
 CDN_HOST = "cdn.drama-prod.interactive-studio.jp"
 AD_HOSTS = ("mediation.unity3d.com", "unityads.unity3d.com", "offerwall.unity3d.com",
             "unity3dusercontent.com", "supersonicads.com", "ironsrc.com")
-PKG = "jp.interactive_studio.seitokai"
+
+
+def _read_pkg():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_config.json"),
+                  encoding="utf-8-sig") as f:
+            p = json.load(f).get("package")
+        if p:
+            return p
+    except Exception:
+        pass
+    return "jp.interactive_studio.seitokai"        # default: season 1
+
+
+PKG = _read_pkg()
 EXTRA_DIR = os.path.join(HERE, "cdn_extra")   # CDN files recovered from your .flow captures
 CONFIG_PATH = os.path.join(HERE, "fake_config.json")
 STATE_PATH = os.path.join(HERE, "fake_state.json")
@@ -239,6 +253,9 @@ def _answer(cid, c):
         rec = _save_record(c.get("save_slot", 1))
         print(f"[fake] 050005 reply { {k: (str(v)[:90] if k == 'data' else v) for k, v in (rec or {}).items()} }")
         return [rec] if rec else []
+    if cid == "050006":                  # restart story; the game uploads a fresh ch1 save (050004) right after
+        print(f"[fake] restart story, slot {c.get('save_slot', 1)}")
+        return []
     if cid == "050008":                  # start / unlock a chapter
         slot = str(_toint(c.get("save_slot", 1)))
         ep, ch = _toint(c.get("episode_id")), _toint(c.get("chapter_id"))
@@ -296,6 +313,8 @@ def _answer(cid, c):
             _save_state()
         print(f"[fake] ruby purchase {key} cost {price}")
         return []
+    if cid == "011002":                  # seen in season 1: a list with one 8-character string
+        return replies.get("011002") or ["00000000"]
     if cid == "013001":                  # slot spin: replay the recorded result, credit its points
         r = dict(replies.get("013001") or {})
         if isinstance(r.get("point"), int) and r["point"] > 0:
