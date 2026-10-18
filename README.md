@@ -1,5 +1,3 @@
-# Offline server for a discontinued mobile game
-
 A mitmproxy add-on that plays the game's dead server from your own recordings and files, so the game runs offline on an emulator.
 
 This is a personal preservation project, not affiliated with the publisher. It contains no game files, and you need your own copy of the game and your own recordings. Do not publish or share game files, captures or save data.
