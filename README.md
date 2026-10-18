@@ -4,6 +4,8 @@ A mitmproxy add-on that plays Interactive Studio Inc. games from your own record
 
 This is a personal preservation project, not affiliated with the publisher. It contains no game files. You need your own copy of the game and your own recordings. Do not publish or share game files, recordings or save data.
 
+###### Actively testing all the games, further generalization will be implemented if needed
+
 ## Finding a game's package name
 
 The server needs the game's package name (for example `jp.interactive_studio.<name>`). It sets the `package` key in `fake_config.json`, the CDN path, and the data folder on the device. Any one of these finds it:
