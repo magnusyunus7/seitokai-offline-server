@@ -23,7 +23,7 @@ import glob
 import json
 import os
 import uuid
-
+import shutil
 import msgpack
 from mitmproxy import http, io
 from zoneinfo import ZoneInfo
@@ -36,18 +36,34 @@ AD_HOSTS = ("mediation.unity3d.com", "unityads.unity3d.com", "offerwall.unity3d.
 
 
 def _read_pkg():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_config.json")
     try:
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_config.json"),
-                  encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             p = json.load(f).get("package")
-        if p:
-            return p
-    except Exception:
-        pass
-    return "jp.interactive_studio.seitokai"        # default: season 1
+    except Exception as e:
+        print(f"[fake] WARNING: could not read {path}: {e}")
+        return ""
+    if not isinstance(p, str) or not p.strip() or "<" in p:
+        print('[fake] WARNING: "package" is missing or still a placeholder in fake_config.json. '
+              'Set it to the game\'s package name.')
+        return ""
+    return p.strip()
 
 
 PKG = _read_pkg()
+_warned = set()
+_blocked = False        # True while the recordings or config don't match the game
+
+
+def _check_pkg(path):
+    seg = path.lstrip("/").split("/", 1)[0]
+    if not seg or seg == "adimage" or seg == PKG or seg in _warned:
+        return
+    _warned.add(seg)
+    print(f'[fake] WARNING: the game requested CDN files for package "{seg}", but fake_config.json says '
+          f'"{PKG or "(not set)"}". Set "package" to "{seg}" and restart mitmweb.')
+
+    
 EXTRA_DIR = os.path.join(HERE, "cdn_extra")   # CDN files recovered from your .flow captures
 CONFIG_PATH = os.path.join(HERE, "fake_config.json")
 STATE_PATH = os.path.join(HERE, "fake_state.json")
@@ -84,9 +100,20 @@ def _load_json(path, default):
         return default
 
 
+def _state_key():
+    return PKG or "_unset"
+
+
 def _save_state():
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=1)
+    disk = _load_json(STATE_PATH, {})              # re-read, so another running game's section isn't clobbered
+    games = disk.get("games") if isinstance(disk, dict) else None
+    if not isinstance(games, dict):
+        games = {}
+    games[_state_key()] = state                    # replace only this game's section
+    tmp = STATE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"games": games}, f, indent=1)
+    os.replace(tmp, STATE_PATH)
 
 
 def _bal(res, delta):                    # delta < 0 = spent, delta > 0 = earned
@@ -105,6 +132,8 @@ def _shape(cmds):
 def _pick_data_dir():
     if cfg.get("data_dir"):
         return cfg["data_dir"]
+    if not PKG:
+        return None
     cands = glob.glob(os.path.join(HERE, "..", "gamedata", "external", "data", PKG))
     cands += glob.glob(os.path.join(HERE, "..", "snapshots", "*", "external", "data", PKG))
     cands = [c for c in cands if os.path.isdir(c)]
@@ -174,7 +203,7 @@ def _learn(path):
 
 
 def _ensure_loaded():
-    global cfg, state, data_dir, _loaded
+    global cfg, state, data_dir, _loaded, _blocked
     if _loaded:
         return
     _loaded = True
@@ -186,10 +215,30 @@ def _ensure_loaded():
         print(f"[fake] created {CONFIG_PATH}")
     for k, v in DEFAULT_CONFIG.items():
         cfg.setdefault(k, v)
-    state = _load_json(STATE_PATH, {"saves": {}})
+    raw = _load_json(STATE_PATH, {})
+    if isinstance(raw, dict) and isinstance(raw.get("games"), dict):
+        state = raw["games"].get(_state_key()) or {}
+    else:                                          # old single-game file
+        state = raw if isinstance(raw, dict) else {}
+        if state:
+            shutil.copy(STATE_PATH, STATE_PATH + ".legacy")
+            print(f"[fake] old-format fake_state.json adopted for {_state_key()} "
+                  f"(backup: fake_state.json.legacy). If it belonged to another game, fix it by hand.")
+    state.setdefault("saves", {})
     total = 0
     for p in sorted(glob.glob(os.path.join(HERE, "*.flow")), key=os.path.getmtime):   # oldest first
         total += _learn(p)
+    ml = (replies.get("020001") or {}).get("manifest_list") or []
+    seen = {e["url"].split("/")[3] for e in ml
+            if isinstance(e, dict) and isinstance(e.get("url"), str) and e["url"].count("/") >= 4}
+    if not PKG:
+        _blocked = True
+    elif seen and PKG not in seen:
+        _blocked = True
+        print(f'[fake] WARNING: the recordings in this folder are for {sorted(seen)}, but "package" is '
+              f'"{PKG}". Start the server from that game\'s own folder, or fix the package.')
+    if _blocked:
+        print("[fake] API and CDN requests will be refused until this is fixed.")
     data_dir = _pick_data_dir()
     nfiles = len(os.listdir(data_dir)) if data_dir else 0
     print(f"[fake] learned {total} api calls, {len(replies)} command ids, "
@@ -199,7 +248,7 @@ def _ensure_loaded():
         print("[fake] WARNING: no login/profile found - capture a normal boot into a .flow file here first")
     # print("[fake] 070001 =", repr(replies.get("070001"))[:600])
     # print("[fake] 070002 languages:", sorted(lang_replies))
-    print("[fake] manifest_list =", repr((replies.get("020001") or {}).get("manifest_list"))[:500])
+    # print("[fake] manifest_list =", repr((replies.get("020001") or {}).get("manifest_list"))[:500])
 
 def _profile():
     p = dict(replies.get("050001") or {})
@@ -360,12 +409,17 @@ def _cdn(flow):
 
 def request(flow: http.HTTPFlow):
     host = flow.request.pretty_host
+    if host == CDN_HOST:
+        _check_pkg(flow.request.path)
     if host.endswith(AD_HOSTS):          # no ad fill -> the game shows "no ads available"
         print(f"[fake] ad blocked {host}")
         flow.kill()
         return
     if host == API_HOST:
         _ensure_loaded()
+        if _blocked:
+            flow.response = http.Response.make(503, b"wrong game folder or package", {"Content-Type": "text/plain"})
+            return
         if flow.request.path.startswith("/oauth/token"):
             print("[fake] login -> recorded token")
             flow.response = http.Response.make(200, token_body or b"{}", {"Content-Type": token_ctype})
@@ -373,6 +427,9 @@ def request(flow: http.HTTPFlow):
             _api(flow)
     elif host == CDN_HOST and flow.request.path.startswith(f"/{PKG}/"):
         _ensure_loaded()
+        if _blocked:
+            flow.response = http.Response.make(404, b"", {})
+            return
         _cdn(flow)
 
 
