@@ -4,7 +4,7 @@ A mitmproxy add-on that plays Interactive Studio Inc. games from your own record
 
 This is a personal preservation project, not affiliated with the publisher. It contains no game files. You need your own copy of the game and your own recordings. Do not publish or share game files, recordings or save data.
 
-###### Actively testing all the games, further generalization will be implemented if needed
+> Actively testing all the games, further generalization or fixes will be implemented if needed.
 
 ## What it does
 
@@ -24,6 +24,28 @@ This is a personal preservation project, not affiliated with the publisher. It c
 - Run `mitmweb` from the venv. The standalone Windows mitmproxy build has its own bundled Python and cannot see packages installed in the venv.
 - The Play Store build of the game, installed unmodified
 
+## Emulator setup (one time)
+
+1. In LDPlayer's settings (Other settings), turn on **ADB debugging** (open local connection), turn on **Root permission**, and set the system disk to **writable**. Restart the instance. These are per instance, so a copied instance may need them again.
+2. Run `mitmweb` once so it creates `%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.pem`.
+3. Get the certificate's file name (OpenSSL ships with Git for Windows):
+```powershell
+   & "C:\Program Files\Git\usr\bin\openssl.exe" x509 -inform PEM -subject_hash_old -in "$env:USERPROFILE\.mitmproxy\mitmproxy-ca-cert.pem" -noout
+```
+   Call the output `<hash>`. The file will be named `<hash>.0`.
+4. Install it as a system certificate:
+```powershell
+   cd C:\LDPlayer\LDPlayer9
+   copy "$env:USERPROFILE\.mitmproxy\mitmproxy-ca-cert.pem" "$env:TEMP\<hash>.0"
+   .\adb.exe push "$env:TEMP\<hash>.0" /sdcard/<hash>.0
+   .\adb.exe shell "su -c 'mount -o remount,rw /system'"
+   .\adb.exe shell "su -c 'cp /sdcard/<hash>.0 /system/etc/security/cacerts/<hash>.0'"
+   .\adb.exe shell "su -c 'chmod 644 /system/etc/security/cacerts/<hash>.0'"
+   .\adb.exe shell "ls -l /system/etc/security/cacerts/<hash>.0"
+```
+5. Restart the instance and run the `ls` line again. The file must still be there.
+6. If Windows Firewall asks, allow `mitmweb` on private networks, so the emulator can reach port 8080.
+
 ## Known limits
 
 - **The fallback is always on.** The server fetches any file it lacks from the real CDN when it can, so a run that works today may be using the real CDN without you noticing. Each `cdn MISSING ... -> real CDN` line in the terminal is a file that is not stored locally yet.
@@ -33,7 +55,7 @@ This is a personal preservation project, not affiliated with the publisher. It c
 
 ## Folder layout (runtime)
 
-The script finds its data relative to its own folder, so keep this layout. Items in ****bold**** are not in git.
+The script finds its data relative to its own folder, so keep this layout. Items marked with asterisks (e.g. \*\*fake_state.json\*\*) are not in git.
 
 ```
 new_version/
@@ -48,11 +70,13 @@ new_version/
   **gamedata/external/data/<package>/**           optional older pull
 ```
 
+Keep one folder per game, each with its own `fake_server.py`, `fake_config.json`, recordings and `cdn_extra/`. The API replies come from the recordings in the folder you start the server from, so `package` must match them. Start the server from the folder of the game you are about to open.
+
 If `data_dir` in the config is empty, the script picks the folder with the most files among `gamedata` and `snapshots`. With more than one game or snapshot, set `data_dir` explicitly.
 
 ## Finding a game's package name
 
-The server needs the game's package name (for example `jp.interactive_studio.<name>`). It sets the `package` key in `fake_config.json`, the CDN path, and the data folder on the device. Any one of these finds it:
+The server needs the game's package name (for example `jp.interactive_studio.<name>`). It goes in the `package` key of `fake_config.json`, and it is also the CDN path and the data folder name on the device. Any one of these finds it:
 
 1. **List the installed games** on the emulator. Install the game first, then run this from the LDPlayer folder (add `-s <serial>` after `adb.exe` if several instances are running; get the serial from `.\adb.exe devices`):
    ```powershell
@@ -108,7 +132,7 @@ The recording contains your login token and account ID, so keep it private and n
 
 - `data_dir`: game files folder. Empty means auto-detect.
 - `ticket`, `ruby`, `point`: starting balances. `null` means use whatever was recorded.
-- `package`: the game's package name. Defaults to `jp.interactive_studio.seitokai` if missing.
+- `package`: required. The game's package name. If it is missing, or the recordings in the folder belong to a different game, the server prints a warning and refuses the game's requests until it is fixed. A value containing `<` is treated as unset.
 - Edits take effect after restarting mitmweb.
 
 ## Daily use
@@ -148,15 +172,17 @@ Taking a snapshot of a device is the same copy in the other direction (`adb pull
 | Area | Commands | Behaviour |
 |---|---|---|
 | Login | `/oauth/token` | Replays the recorded token reply |
-| Profile | `050001` | Recorded reply, with `ticket`, `ruby`, `point` overridden from the config and adjusted by the state file |
-| Cloud save | `050005`, `050004` | Saves are stored per slot; the game's position comes from the saved `data` blob |
-| Chapter start | `050008` | Progress only moves forward. A chapter costs its listed tickets once, then replays are free |
-| Premium choices | `080001`, `080002` | Price comes from the `080001` row; bought choices are remembered and flagged as owned |
-| Exchange | `060004` | Points to rubies or tickets, tracked in the state file |
-| Slot machine | `013001` | Point rewards are tracked in the state file |
-| Language | `070001`, `070002` | Per-language text packs replayed from recordings (English recorded) |
 | File URLs | `020002` | Recorded URLs are reused; for unseen hashes, URLs pointing back at this server are invented |
+| Profile | `050001` | Recorded reply, with `ticket`, `ruby`, `point` overridden from the config and adjusted by the state file |
+| Cloud save | `050004`, `050005` | Saves are stored per slot; the game's position comes from the saved `data` blob |
+| Restart story | `050006` | Logged only. The game uploads a fresh chapter 1 save right after |
+| Chapter start | `050008` | Progress only moves forward. A chapter costs its listed tickets once, then replays are free |
 | Ads | host block, `050018` | Ad hosts are blocked; the reward claim returns `False` |
+| Exchange | `060004` | Points to rubies or tickets, tracked in the state file |
+| Language | `070001`, `070002` | Per-language text packs replayed from recordings (English recorded) |
+| Premium choices | `080001`, `080002` | Price comes from the `080001` row; bought choices are remembered and flagged as owned |
+| Misc | `011002` | Replays the recorded reply, or a placeholder 8-character string |
+| Slot machine | `013001` | Point rewards are tracked in the state file |
 | Anything else | | Replays the last recorded reply, or prints `UNKNOWN command` |
 
 ## The real-CDN fallback
@@ -189,7 +215,7 @@ The API side works the same way. API calls are never forwarded, so a command the
 
 ## State file
 
-`fake_state.json` is written by the script. Do not edit it while mitmweb is running, because the next save overwrites your edit.
+`fake_state.json` is written by the script, with one section per game under `games`, named by package. Games never share saves, balances, purchases or unlocked chapters. An old single-game file is adopted for the current package on first run, and a backup is saved as `fake_state.json.legacy`. Do not edit the file while mitmweb is running, because the next save overwrites your edit.
 
 | Key | Meaning |
 |---|---|
@@ -202,7 +228,7 @@ The API side works the same way. API calls are never forwarded, so a command the
 
 Displayed balance = config value, minus spent, plus earned, never below 0.
 
-To jump to a chapter: stop the server, set `chapter_id` in the save, and set `"chapterId":"ChN"` and `"commandId":null` inside the `data` string to match. Keep a backup first.
+To jump to a chapter: stop the server, open `fake_state.json`, and find the save under `games` > `<package>` > `saves` > `<slot>`. Set `chapter_id` to the chapter number, and inside the `data` string set `"chapterId":"ChN"` and `"commandId":null` to match. Keep a backup first.
 
 ## Recording what is missing
 
@@ -226,6 +252,13 @@ The first-launch recording is covered in **Before you start**. The same method f
 | Game returns to chapter 1 after closing | The saved chapter was overwritten. `050008` must only move progress forward, and `chapter_id` in the save must match the `data` blob |
 | Ad button loops forever | The ad hosts are not being blocked. Restart mitmweb and the game |
 | Game restarts at the language screen | Normal after clearing the app's data. Pick the same language |
+| Game shows a connection or server error at startup, and the terminal says the recordings are for a different package | The folder holds another game’s recordings. Start the server from the right game’s folder, or fix package, then restart mitmweb |
+| Terminal says `"package" is missing or still a placeholder` | Set `package` in `fake_config.json` to the game’s real package name (see Finding a game’s package name) |
+| `adb devices` shows nothing	| ADB debugging is off for that instance, or the instance isn’t running |
+| `su: not found`, or `Read-only file system` when installing the certificate | Root permission or the writable system disk setting is off for that instance. Fix it and restart |
+| TLS handshake errors in mitmweb naming the game’s hosts | The certificate isn’t installed as a system certificate |
+| TLS errors naming `middledata.ldplayer.net` | LDPlayer’s own traffic. Ignore it |
+| Nothing shows up in mitmweb	| Wrong PC address in the proxy setting, or the firewall blocks port 8080 |
 
 ## Doing this for another game from the same studio
 
@@ -241,8 +274,10 @@ Games from the studio share the same hosts and a very similar API, so the server
 Keep these out of git. Recordings contain your login token and account ID, and the game files belong to the publisher.
 
 ```
+__pycache__/
 *.flow
-fake_state.json
+fake_state.json*
+api_bodies/
 cdn_extra/
 old_flows/
 snapshots/
@@ -256,7 +291,6 @@ gamedata/
 
 - Engine: Unity IL2CPP, arm64 only. The base APK holds `global-metadata.dat`; the split APK holds `libil2cpp.so`. Tools: Il2CppDumper, Ghidra with the dumper's script.
 - Network code: the API client is `FPPOOLFBDBH`, built by `IFCJFFGGLME`. The URL comes from `BPODNMBNGML`, which keeps its strings as encrypted byte arrays and decrypts them with a repeating-key XOR (key array of 128 bytes, in the same file).
-- In `global-metadata.dat` of this build: key array at offset 6057576, API URL array at 6078176 (48 bytes), OAuth URL array at 6078344 (56 bytes).
 - API: MessagePack. A request is a list of command objects (`{"id": "050001", ...}`) and the reply is a dict keyed by command ID.
 - Game catalog: `drama.dat` (a header, then a raw deflate stream from byte 31) lists file hashes in chapter order. The first 8 entries are shared files. It lists 376 hashes, and the server's `020002` list covers about 1,121.
 - Ads: LevelPlay (ironSource) through Unity mediation.
