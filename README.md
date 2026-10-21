@@ -53,6 +53,12 @@ This is a personal preservation project, not affiliated with the publisher. It c
 - **No patched APK.** The game checks that it was installed from Google Play. A re-signed, unmodified rebuild already refuses to start ("get it on Google Play"), so redirecting the app to another server by repackaging it does not work. Do not expect a standalone APK from this project.
 - Phone play needs a rooted phone, with the mitmproxy CA as a system certificate and the two game hostnames redirected to the server. This has not been tested.
 
+## Languages
+
+Only languages that were recorded can be used. Each language has its own text pack and its own script files, so the server can only replay what was recorded.
+
+**Reminder:** if the player switches to a language that wasn't recorded, the server refuses the request, the game shows its error, and the terminal prints `REFUSED: language N was never recorded`. The game stores the chosen language on the device (in `usrdata/cfg.dat`), so it can keep asking for that language on later launches. Only switch to languages you recorded. To add another language, switch to it while recording through the real server.
+
 ## Folder layout (runtime)
 
 The script finds its data relative to its own folder, so keep this layout. Items marked with asterisks (e.g. \*\*fake_state.json\*\*) are not in git.
@@ -65,12 +71,12 @@ new_version/
     **fake_state.json**     created at runtime: saves, balances, purchases
     **<name>.flow**         your recordings (contain your login token)
     **old_flows/**          recordings kept but ignored
-    **cdn_extra/**          CDN files recovered from recordings or the real CDN
+    **cdn_extra_<name>/**          CDN files recovered from recordings or the real CDN
   **snapshots/<snap>/external/data/<package>/**   game files pulled from a device
   **gamedata/external/data/<package>/**           optional older pull
 ```
 
-Keep one folder per game, each with its own `fake_server.py`, `fake_config.json`, recordings and `cdn_extra/`. The API replies come from the recordings in the folder you start the server from, so `package` must match them. Start the server from the folder of the game you are about to open.
+Recordings for several games can share one folder. On startup the server works out which game each `.flow` belongs to and learns only the ones that match `package`, skipping the rest with a note. To switch games, change `package` in `fake_config.json` and restart mitmweb.
 
 If `data_dir` in the config is empty, the script picks the folder with the most files among `gamedata` and `snapshots`. With more than one game or snapshot, set `data_dir` explicitly.
 
@@ -109,7 +115,7 @@ The server answers the game's API only from your own recordings. Without a recor
 ```powershell
    mitmweb --listen-port 8080 -w <name>.flow
 ```
-3. Open the game and pick a language. Let every initial download finish, then play into the first chapter. If the account has already progressed, use the game's **restart story** option, which makes it download the early chapters again.
+3. Open the game and pick the language you want to keep. Only recorded languages work later (see **Languages**). Record each game in its own mitmweb session, because a recording is assigned to the first game found in it.
 4. Close the game, then press Ctrl+C in the terminal so the file saves.
 5. Pull the game's data folder from the device (`adb pull`) into `snapshots/`, so the downloaded files are also kept locally.
 6. Set `package` in `fake_config.json` and start the server (see **Daily use**).
@@ -146,7 +152,7 @@ The recording contains your login token and account ID, so keep it private and n
    cd C:\LDPlayer\LDPlayer9
    .\adb.exe shell settings put global http_proxy <PC-IP>:8080
    ```
-3. Open the game. If it asks for a language, pick English.
+3. Open the game. If it asks for a language, pick the language you recorded.
 4. Turn the proxy off when you want normal internet back:
    ```powershell
    .\adb.exe shell settings put global http_proxy :0
@@ -172,17 +178,19 @@ Taking a snapshot of a device is the same copy in the other direction (`adb pull
 | Area | Commands | Behaviour |
 |---|---|---|
 | Login | `/oauth/token` | Replays the recorded token reply |
+| Misc | `011002` | Replays the recorded reply, or a placeholder 8-character string |
+| Bookkeeping | `011006`, `050017` | Empty replies, as on the real server |
+| Slot machine | `013001` | Point rewards are tracked in the state file |
 | File URLs | `020002` | Recorded URLs are reused; for unseen hashes, URLs pointing back at this server are invented |
 | Profile | `050001` | Recorded reply, with `ticket`, `ruby`, `point` overridden from the config and adjusted by the state file |
 | Cloud save | `050004`, `050005` | Saves are stored per slot; the game's position comes from the saved `data` blob |
 | Restart story | `050006` | Logged only. The game uploads a fresh chapter 1 save right after |
 | Chapter start | `050008` | Progress only moves forward. A chapter costs its listed tickets once, then replays are free |
+| Nickname | `050014`, `050015` | The name the player sets is stored per game; otherwise the recorded name is used |
 | Ads | host block, `050018` | Ad hosts are blocked; the reward claim returns `False` |
 | Exchange | `060004` | Points to rubies or tickets, tracked in the state file |
-| Language | `070001`, `070002` | Per-language text packs replayed from recordings (English recorded) |
+| Language | `070001`, `070002` | Text packs replayed from recordings. Unrecorded languages are refused (see Languages) |
 | Premium choices | `080001`, `080002` | Price comes from the `080001` row; bought choices are remembered and flagged as owned |
-| Misc | `011002` | Replays the recorded reply, or a placeholder 8-character string |
-| Slot machine | `013001` | Point rewards are tracked in the state file |
 | Anything else | | Replays the last recorded reply, or prints `UNKNOWN command` |
 
 ## The real-CDN fallback
@@ -194,8 +202,8 @@ When the game asks the CDN for a file the server does not have, the server can f
 | Step | Source | Notes |
 |---|---|---|
 | 1 | The game's data folder (`snapshots` or `gamedata`) | Files pulled from a device, named by hash |
-| 2 | `cdn_extra/` | Files extracted from your `.flow` recordings on startup, plus anything the fallback cached |
-| 3 | The real CDN | If the CDN is still up, a 200 reply is saved to `cdn_extra/` |
+| 2 | `cdn_extra_<name>/` | Files extracted from your `.flow` recordings on startup, plus anything the fallback cached |
+| 3 | The real CDN | If the CDN is still up, a 200 reply is saved to `cdn_extra_<name>/` |
 | 4 | A 404 | The game shows "Error while trying to access CDN server" and keeps loading |
 
 **What you see in the terminal:**
@@ -205,11 +213,11 @@ When the game asks the CDN for a file the server does not have, the server can f
 
 **Why it can fetch files you never downloaded.** The server keeps the recorded `020002` reply, which lists the real CDN URL for every file in the catalog. The game asks for those URLs at boot. So a file from a chapter you never opened can still be requested at its real address, as long as the real CDN still serves it.
 
-**It only works while the real CDN is up.** If the CDN host goes offline, or the publisher stops serving the files or starts signing and expiring the URLs, the fallback fails. Nothing gets cached, step 3 returns an error, and the game stops at the CDN error screen. After that, the only files available are the ones already on disk: the data folder, `cdn_extra/`, and the bodies inside your recordings. A file counts as preserved once it is local, meaning a `cached` line was printed or it is in the data folder.
+**It only works while the real CDN is up.** If the CDN host goes offline, or the publisher stops serving the files or starts signing and expiring the URLs, the fallback fails. Nothing gets cached, step 3 returns an error, and the game stops at the CDN error screen. After that, the only files available are the ones already on disk: the data folder, `cdn_extra_<name>/`, and the bodies inside your recordings. A file counts as preserved once it is local, meaning a `cached` line was printed or it is in the data folder.
 
 **Intended use.** The fallback recovers files the game already asked for. It is not a way to download content your own account has not unlocked, and it is not guaranteed to keep working. Record anything you want to keep through the normal route (see **Recording what is missing**) while the real server is still up.
 
-Back up `cdn_extra/` together with your snapshots. It holds every file the fallback has saved, and those files are only safe once they are local.
+Back up `cdn_extra_<name>/` together with your snapshots. It holds every file the fallback has saved, and those files are only safe once they are local.
 
 The API side works the same way. API calls are never forwarded, so a command the game sends but you never recorded prints `UNKNOWN command` and gets an empty reply.
 
@@ -225,6 +233,7 @@ The API side works the same way. API calls are never forwarded, so a command the
 | `ticket_spent`, `ticket_earned` | Running totals |
 | `bought` | Premium choices already purchased |
 | `unlocked` | Chapters already charged (`episode:chapter`) |
+| `nickname` | The name the player last set. |
 
 Displayed balance = config value, minus spent, plus earned, never below 0.
 
@@ -246,25 +255,29 @@ The first-launch recording is covered in **Before you start**. The same method f
 |---|---|
 | `No module named 'msgpack'` in mitmweb | mitmweb is not running from the venv. Run `pip install -r requirements.txt` inside the venv and start `mitmweb` from it |
 | `Error while trying to access CDN server`, stuck loading | A file is missing. Check the terminal for `cdn MISSING` and see **The real-CDN fallback** |
-| `cdn MISSING ... -> real CDN, will cache` then `cached` | Working as designed: the file was fetched once from the real CDN and stored in `cdn_extra` |
+| `cdn MISSING ... -> real CDN, will cache` then `cached` | Working as designed: the file was fetched once from the real CDN and stored in `cdn_extra_<name>` |
 | `cdn MISSING` and no `cached` line | The real CDN refused it or is gone. Record that file from a real session while the server is up |
 | `UNKNOWN command XXXXXX` | A reply you have not recorded. Record a session through the real server, or find the response shape in the il2cpp dump |
+| `REFUSED: language N was never recorded` | The game asked for a language that wasn’t recorded (see `Languages`) |
+| `NOTE: old shared folder 'cdn_extra' found and ignored` | Rename it to the `cdn_extra_<name>` shown in the message, if its files belong to that game |
+| `skipped recording <name> (...)` | Informational. That recording belongs to a different game |
 | Game returns to chapter 1 after closing | The saved chapter was overwritten. `050008` must only move progress forward, and `chapter_id` in the save must match the `data` blob |
 | Ad button loops forever | The ad hosts are not being blocked. Restart mitmweb and the game |
 | Game restarts at the language screen | Normal after clearing the app's data. Pick the same language |
-| Game shows a connection or server error at startup, and the terminal says the recordings are for a different package | The folder holds another game’s recordings. Start the server from the right game’s folder, or fix package, then restart mitmweb |
+| Game shows a connection or server error, and the terminal says `the game logging in is X`, or the recordings are for a different package | `package` doesn’t match the game you opened. Set `package` to the game’s package name and restart mitmweb. If no recording belongs to it, record a first launch |
 | Terminal says `"package" is missing or still a placeholder` | Set `package` in `fake_config.json` to the game’s real package name (see Finding a game’s package name) |
 | `adb devices` shows nothing	| ADB debugging is off for that instance, or the instance isn’t running |
 | `su: not found`, or `Read-only file system` when installing the certificate | Root permission or the writable system disk setting is off for that instance. Fix it and restart |
 | TLS handshake errors in mitmweb naming the game’s hosts | The certificate isn’t installed as a system certificate |
 | TLS errors naming `middledata.ldplayer.net` | LDPlayer’s own traffic. Ignore it |
 | Nothing shows up in mitmweb	| Wrong PC address in the proxy setting, or the firewall blocks port 8080 |
+| Terminal says `no recording in this folder belongs to ...` | Record a first launch for that game, or fix `package` |
 
 ## Doing this for another game from the same studio
 
 Games from the studio share the same hosts and a very similar API, so the server is mostly game-independent. Expect small per-game differences.
 
-1. Set `package` (and `data_dir`) in the config. Use a separate folder per game for recordings, snapshots and state.
+1. Set `package` (and `data_dir`) in the config. Recordings, saved state and `cdn_extra_<name>` are separated by package automatically, so one folder can hold several games.
 2. Record a clean first launch through the real server first, then play as far as you can with the proxy on, so CDN bodies end up in the recordings.
 3. Run the server and watch for `UNKNOWN command` lines. A command may exist in one game's recordings and not another's, so add a handler or record more.
 4. Check the per-game parts against the table above: the catalog, the chapter list, the save blob, the exchange asset IDs, and game-specific features such as premium choices.
@@ -278,7 +291,7 @@ __pycache__/
 *.flow
 fake_state.json*
 api_bodies/
-cdn_extra/
+cdn_extra*/
 old_flows/
 snapshots/
 gamedata/
