@@ -25,8 +25,11 @@ import os
 import uuid
 import shutil
 import msgpack
+import re
+import time
 from mitmproxy import http, io
 from zoneinfo import ZoneInfo
+from urllib.parse import parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 API_HOST = "api.drama-prod.interactive-studio.jp"
@@ -51,8 +54,22 @@ def _read_pkg():
 
 
 PKG = _read_pkg()
+
+
+def _extra_dir():
+    prefix = "jp.interactive_studio."
+    name = PKG[len(prefix):] if PKG.startswith(prefix) else PKG
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name) or "unset"
+    return os.path.join(HERE, "cdn_extra_" + name)
+
+
+EXTRA_DIR = _extra_dir()
 _warned = set()
 _blocked = False        # True while the recordings or config don't match the game
+
+
+class _Refuse(Exception):
+    pass
 
 
 def _check_pkg(path):
@@ -63,8 +80,7 @@ def _check_pkg(path):
     print(f'[fake] WARNING: the game requested CDN files for package "{seg}", but fake_config.json says '
           f'"{PKG or "(not set)"}". Set "package" to "{seg}" and restart mitmweb.')
 
-    
-EXTRA_DIR = os.path.join(HERE, "cdn_extra")   # CDN files recovered from your .flow captures
+
 CONFIG_PATH = os.path.join(HERE, "fake_config.json")
 STATE_PATH = os.path.join(HERE, "fake_state.json")
 DEFAULT_CONFIG = {
@@ -194,12 +210,40 @@ def _learn(path):
                     if isinstance(c, dict) and c.get("id") == "020002" and "020002" in resp:
                         hl, ul = c.get("hash_list", []), resp["020002"]
                         for h, urls in zip(hl, ul):
-                            if h not in urls_by_hash:
-                                print("[fake] 020002 sample:", h[:8], repr(urls)[:300])
                             _register_urls(h, urls)
                     if isinstance(c, dict) and c.get("id") == "070002" and "070002" in resp:
                         lang_replies[str(c.get("language_id"))] = resp["070002"]
     return n
+
+
+def _flow_pkgs(path):
+    """Package a recording belongs to: first CDN path segment or manifest URL found in it."""
+    found = set()
+    try:
+        with open(path, "rb") as f:
+            for fl in io.FlowReader(f).stream():
+                if not isinstance(fl, http.HTTPFlow):
+                    continue
+                h = fl.request.pretty_host
+                if h == CDN_HOST:
+                    seg = fl.request.path.lstrip("/").split("/", 1)[0]
+                    if seg and seg != "adimage":
+                        found.add(seg)
+                elif h == API_HOST and fl.response is not None and fl.request.path.startswith("/api"):
+                    try:
+                        resp = _unpack(fl.response.content)
+                    except Exception:
+                        continue
+                    if isinstance(resp, dict):
+                        for e in (resp.get("020001") or {}).get("manifest_list") or []:
+                            u = e.get("url") if isinstance(e, dict) else None
+                            if isinstance(u, str) and u.count("/") >= 4:
+                                found.add(u.split("/")[3])
+                if found:
+                    break                      # first clue is enough, which keeps startup fast
+    except Exception:
+        pass
+    return found
 
 
 def _ensure_loaded():
@@ -226,8 +270,21 @@ def _ensure_loaded():
                   f"(backup: fake_state.json.legacy). If it belonged to another game, fix it by hand.")
     state.setdefault("saves", {})
     total = 0
+    matched = 0
+    skipped = []
     for p in sorted(glob.glob(os.path.join(HERE, "*.flow")), key=os.path.getmtime):   # oldest first
-        total += _learn(p)
+        pk = _flow_pkgs(p)
+        if PKG and PKG in pk:
+            total += _learn(p)
+            matched += 1
+        else:
+            skipped.append((os.path.basename(p), ", ".join(sorted(pk)) or "no game detected"))
+    for name, why in skipped:
+        print(f"[fake] skipped recording {name} ({why})")
+    if PKG and matched == 0:
+        _blocked = True
+        print(f'[fake] WARNING: no recording in this folder belongs to "{PKG}". '
+              f'Record a first launch for it, or fix "package".')
     ml = (replies.get("020001") or {}).get("manifest_list") or []
     seen = {e["url"].split("/")[3] for e in ml
             if isinstance(e, dict) and isinstance(e.get("url"), str) and e["url"].count("/") >= 4}
@@ -239,6 +296,12 @@ def _ensure_loaded():
               f'"{PKG}". Start the server from that game\'s own folder, or fix the package.')
     if _blocked:
         print("[fake] API and CDN requests will be refused until this is fixed.")
+    if PKG and not _blocked:
+        os.makedirs(EXTRA_DIR, exist_ok=True)          # created on first use
+    legacy = os.path.join(HERE, "cdn_extra")
+    if os.path.isdir(legacy):
+        print(f"[fake] NOTE: old shared folder 'cdn_extra' found and ignored. If its files belong to "
+              f"this game, rename it to '{os.path.basename(EXTRA_DIR)}'.")
     data_dir = _pick_data_dir()
     nfiles = len(os.listdir(data_dir)) if data_dir else 0
     print(f"[fake] learned {total} api calls, {len(replies)} command ids, "
@@ -246,9 +309,7 @@ def _ensure_loaded():
     print(f"[fake] data dir: {data_dir} ({nfiles} files)")
     if not token_body or "050001" not in replies:
         print("[fake] WARNING: no login/profile found - capture a normal boot into a .flow file here first")
-    # print("[fake] 070001 =", repr(replies.get("070001"))[:600])
-    # print("[fake] 070002 languages:", sorted(lang_replies))
-    # print("[fake] manifest_list =", repr((replies.get("020001") or {}).get("manifest_list"))[:500])
+
 
 def _profile():
     p = dict(replies.get("050001") or {})
@@ -275,6 +336,16 @@ def _save_record(slot):
 def _answer(cid, c):
     if cid in ("050004", "050005", "050008"):
         print(f"[fake] {cid} req { {k: (str(v)[:70] if k == 'data' else v) for k, v in c.items() if k != 'id'} }")
+    if cid == "011002":                  # a list with one 8-character string
+        return replies.get("011002") or ["00000000"]
+    if cid in ("011006", "050017"):      # empty list on the real server (volume settings, chapter progress ping)
+        return []
+    if cid == "013001":                  # slot spin: replay the recorded result, credit its points
+        r = replies.get("013001")
+        if isinstance(r, dict) and isinstance(r.get("point"), int) and r["point"] > 0:
+            _bal("point", r["point"])
+            _save_state()
+        return r if r is not None else []
     if cid == "020002":                  # urls for a list of file hashes
         out = []
         for h in c.get("hash_list", []):
@@ -283,7 +354,7 @@ def _answer(cid, c):
                 _register_urls(h, [f"https://{CDN_HOST}/{PKG}/{u}"] * 5)
             out.append(urls_by_hash[h])
         return out
-    if cid == "050001":
+    if cid == "050001":                  # profile
         return _profile()
     if cid == "050004":                  # save upload
         slot = str(_toint(c.get("save_slot", 1)))
@@ -325,6 +396,21 @@ def _answer(cid, c):
             print(f"[fake] chapter {key} unlocked, cost {cost} ticket(s)")
         _save_state()
         return []
+    if cid == "050014":                  # nickname lookup: the stored name wins over the recorded one
+        r = replies.get("050014")
+        nick = state.get("nickname")
+        if nick:
+            if isinstance(r, dict):
+                r = dict(r, nickname=nick)
+            elif isinstance(r, list) and r and isinstance(r[0], dict):
+                r = [dict(r[0], nickname=nick)] + list(r[1:])
+        return r if r is not None else []
+    if cid == "050015":                  # the player sets or changes the nickname
+        nick = c.get("nickname")
+        if isinstance(nick, str) and nick:
+            state["nickname"] = nick
+            _save_state()
+        return []
     if cid == "050018":                  # ad reward claim: reply is a bool (+ profile); False = nothing granted
         return False
     if cid == "060004":                  # exchange points: asset 11 = rubies, 12 = tickets
@@ -340,7 +426,12 @@ def _answer(cid, c):
         return []
     if cid == "070002":                  # i18n pack for the chosen language
         lang = str(c.get("language_id", 1))
-        return lang_replies.get(lang) or lang_replies.get("1") or {}
+        pack = lang_replies.get(lang)
+        if pack is None:
+            raise _Refuse(f"language {lang} was never recorded (recorded: {sorted(lang_replies) or 'none'}). "
+                          "Restore usrdata/cfg.dat from your snapshot to return to a recorded language, "
+                          "or record that language through the real server.")
+        return pack
     if cid == "080001":                  # premium list: flag bought products
         bought = set(state.get("bought", []))
         idx = cfg.get("purchased_idx", 8)
@@ -362,15 +453,7 @@ def _answer(cid, c):
             _save_state()
         print(f"[fake] ruby purchase {key} cost {price}")
         return []
-    if cid == "011002":                  # seen in season 1: a list with one 8-character string
-        return replies.get("011002") or ["00000000"]
-    if cid == "013001":                  # slot spin: replay the recorded result, credit its points
-        r = dict(replies.get("013001") or {})
-        if isinstance(r.get("point"), int) and r["point"] > 0:
-            _bal("point", r["point"])
-            _save_state()
-        return r
-    if cid in replies:
+    if cid in replies:                   # anything else: replay the last recorded reply
         return replies[cid]
     if cid not in _seen_unknown:         # print each unknown command once
         _seen_unknown.add(cid)
@@ -383,9 +466,14 @@ def _answer(cid, c):
 def _api(flow):
     cmds = _unpack(flow.request.content)
     out = dict(by_shape.get(_shape(cmds), {}))   # identical past request: start from its reply
-    for c in cmds:
-        if isinstance(c, dict) and "id" in c:
-            out[c["id"]] = _answer(c["id"], c)
+    try:
+        for c in cmds:
+            if isinstance(c, dict) and "id" in c:
+                out[c["id"]] = _answer(c["id"], c)
+    except _Refuse as e:
+        print(f"[fake] REFUSED: {e}")
+        flow.response = http.Response.make(503, b"not available offline", {"Content-Type": "text/plain"})
+        return
     ids = [c.get("id") for c in cmds if isinstance(c, dict)]
     print(f"[fake] api  {' '.join(str(i) for i in ids)}")
     flow.response = http.Response.make(
@@ -407,6 +495,26 @@ def _cdn(flow):
         flow.metadata["passthrough"] = True      # no response set, so mitmproxy forwards it
 
 
+_login_warned = False
+
+
+def _login_pkg(flow):
+    """Package name sent in the game's login form, or None. Never prints credentials."""
+    global _login_warned
+    try:
+        form = parse_qs(flow.request.get_text(strict=False) or "")
+    except Exception:
+        return None
+    for vals in form.values():
+        for v in vals:
+            if re.fullmatch(r"[a-z0-9_]+(\.[a-z0-9_]+){2,}", v):    # looks like a package name
+                return v
+    if not _login_warned:                                           # field layout differs: show names only
+        _login_warned = True
+        print(f"[fake] NOTE: no package name found in the login form (fields: {sorted(form)})")
+    return None
+
+
 def request(flow: http.HTTPFlow):
     host = flow.request.pretty_host
     if host == CDN_HOST:
@@ -421,6 +529,12 @@ def request(flow: http.HTTPFlow):
             flow.response = http.Response.make(503, b"wrong game folder or package", {"Content-Type": "text/plain"})
             return
         if flow.request.path.startswith("/oauth/token"):
+            lp = _login_pkg(flow)
+            if lp and lp != PKG:
+                print(f'[fake] WARNING: the game logging in is "{lp}", but fake_config.json says '
+                      f'"{PKG}". Set "package" to "{lp}" and restart mitmweb.')
+                flow.response = http.Response.make(503, b"wrong package", {"Content-Type": "text/plain"})
+                return
             print("[fake] login -> recorded token")
             flow.response = http.Response.make(200, token_body or b"{}", {"Content-Type": token_ctype})
         elif flow.request.path.startswith("/api"):
