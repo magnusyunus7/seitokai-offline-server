@@ -11,11 +11,27 @@ This is a personal preservation project, not affiliated with the publisher. It c
 - Answers the game's API host itself and never forwards those requests to the real server, so nothing you do reaches a real account.
   - API: `api.drama-prod.interactive-studio.jp` (`/oauth/token` and `/api`, MessagePack bodies)
   - CDN: `cdn.drama-prod.interactive-studio.jp/<package>/<uuid>`
-- Learns the server's replies from every `*.flow` recording in its folder, including the CDN file bodies inside them.
+- Learns the server's replies from the `*.flow` recordings that belong to the configured game, including the CDN file bodies inside them.
 - Serves the game's files from local folders, by hash. If a file is missing, it can fetch it once from the real CDN and keep it (see **The real-CDN fallback**).
-- Keeps progress, balances and purchases in `fake_state.json`.
+- Keeps progress, balances and purchases in `fake_state.json`, separately for each game.
 - Blocks the ad network, so ad buttons show the game's own "no ads available" message instead of loading forever.
 - Passes everything else (analytics, Google, and so on) through unchanged.
+
+## Quick start
+
+1. Install the game on the emulator and set the emulator up (see **Emulator setup**).
+2. Record a first launch through the real server (see **Before you start**). This step is required.
+3. Set `package` in `fake_config.json` (see **Finding a game's package name**).
+4. Start the server and point the emulator at it (see **Daily use**).
+
+## Known limits
+
+- **The fallback is always on.** The server fetches any file it lacks from the real CDN when it can, so a run that works today may be using the real CDN without you noticing. Each `cdn MISSING ... -> real CDN` line in the terminal is a file that is not stored locally yet.
+- The fallback stops working when the CDN is shut down. Only files you already downloaded or cached are available after that.
+- **One game per server run.** To switch games, change `package` in `fake_config.json` and restart mitmweb. The balances in `fake_config.json` apply to whichever game is running.
+- Save timestamps are written in the Asia/Singapore time zone.
+- **No patched APK.** The game checks that it was installed from Google Play. A re-signed, unmodified rebuild already refuses to start ("get it on Google Play"), so redirecting the app to another server by repackaging it does not work. Do not expect a standalone APK from this project.
+- Phone play needs a rooted phone, with the mitmproxy CA as a system certificate and the two game hostnames redirected to the server. This has not been tested.
 
 ## Requirements
 
@@ -29,12 +45,12 @@ This is a personal preservation project, not affiliated with the publisher. It c
 1. In LDPlayer's settings (Other settings), turn on **ADB debugging** (open local connection), turn on **Root permission**, and set the system disk to **writable**. Restart the instance. These are per instance, so a copied instance may need them again.
 2. Run `mitmweb` once so it creates `%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.pem`.
 3. Get the certificate's file name (OpenSSL ships with Git for Windows):
-```powershell
+   ```powershell
    & "C:\Program Files\Git\usr\bin\openssl.exe" x509 -inform PEM -subject_hash_old -in "$env:USERPROFILE\.mitmproxy\mitmproxy-ca-cert.pem" -noout
-```
+   ```
    Call the output `<hash>`. The file will be named `<hash>.0`.
 4. Install it as a system certificate:
-```powershell
+   ```powershell
    cd C:\LDPlayer\LDPlayer9
    copy "$env:USERPROFILE\.mitmproxy\mitmproxy-ca-cert.pem" "$env:TEMP\<hash>.0"
    .\adb.exe push "$env:TEMP\<hash>.0" /sdcard/<hash>.0
@@ -42,22 +58,9 @@ This is a personal preservation project, not affiliated with the publisher. It c
    .\adb.exe shell "su -c 'cp /sdcard/<hash>.0 /system/etc/security/cacerts/<hash>.0'"
    .\adb.exe shell "su -c 'chmod 644 /system/etc/security/cacerts/<hash>.0'"
    .\adb.exe shell "ls -l /system/etc/security/cacerts/<hash>.0"
-```
+   ```
 5. Restart the instance and run the `ls` line again. The file must still be there.
 6. If Windows Firewall asks, allow `mitmweb` on private networks, so the emulator can reach port 8080.
-
-## Known limits
-
-- **The fallback is always on.** The server fetches any file it lacks from the real CDN when it can, so a run that works today may be using the real CDN without you noticing. Each `cdn MISSING ... -> real CDN` line in the terminal is a file that is not stored locally yet.
-- The fallback stops working when the CDN is shut down. Only files you already downloaded or cached are available after that.
-- **No patched APK.** The game checks that it was installed from Google Play. A re-signed, unmodified rebuild already refuses to start ("get it on Google Play"), so redirecting the app to another server by repackaging it does not work. Do not expect a standalone APK from this project.
-- Phone play needs a rooted phone, with the mitmproxy CA as a system certificate and the two game hostnames redirected to the server. This has not been tested.
-
-## Languages
-
-Only languages that were recorded can be used. Each language has its own text pack and its own script files, so the server can only replay what was recorded.
-
-**Reminder:** if the player switches to a language that wasn't recorded, the server refuses the request, the game shows its error, and the terminal prints `REFUSED: language N was never recorded`. The game stores the chosen language on the device (in `usrdata/cfg.dat`), so it can keep asking for that language on later launches. Only switch to languages you recorded. To add another language, switch to it while recording through the real server.
 
 ## Folder layout (runtime)
 
@@ -66,12 +69,12 @@ The script finds its data relative to its own folder, so keep this layout. Items
 ```
 new_version/
   captures/
-    fake_server.py          the add-on
-    fake_config.json        package, balances, data folder
-    **fake_state.json**     created at runtime: saves, balances, purchases
-    **<name>.flow**         your recordings (contain your login token)
-    **old_flows/**          recordings kept but ignored
-    **cdn_extra_<name>/**          CDN files recovered from recordings or the real CDN
+    fake_server.py              the add-on
+    fake_config.json            package, balances, data folder
+    **fake_state.json**         created at runtime: saves, balances, purchases
+    **<name>.flow**             your recordings (contain your login token)
+    **old_flows/**              recordings kept but ignored
+    **cdn_extra_<name>/**       CDN files recovered from recordings or the real CDN
   **snapshots/<snap>/external/data/<package>/**   game files pulled from a device
   **gamedata/external/data/<package>/**           optional older pull
 ```
@@ -112,9 +115,9 @@ The server answers the game's API only from your own recordings. Without a recor
 
 1. Install the game on the emulator and set up the proxy (see **Requirements**).
 2. In the `captures` folder, start a plain recording, without the add-on:
-```powershell
+   ```powershell
    mitmweb --listen-port 8080 -w <name>.flow
-```
+   ```
 3. Open the game and pick the language you want to keep. Only recorded languages work later (see **Languages**). Record each game in its own mitmweb session, because a recording is assigned to the first game found in it.
 4. Close the game, then press Ctrl+C in the terminal so the file saves.
 5. Pull the game's data folder from the device (`adb pull`) into `snapshots/`, so the downloaded files are also kept locally.
@@ -173,6 +176,12 @@ cd C:\LDPlayer\LDPlayer9
 
 Taking a snapshot of a device is the same copy in the other direction (`adb pull`).
 
+## Languages
+
+Only languages that were recorded can be used. Each language has its own text pack and its own script files, so the server can only replay what was recorded.
+
+**Reminder:** if the player switches to a language that wasn't recorded, the server refuses the request, the game shows its error, and the terminal prints `REFUSED: language N was never recorded`. The game stores the chosen language on the device (in `usrdata/cfg.dat`), so it can keep asking for that language on later launches. Only switch to languages you recorded. To add another language, switch to it while recording through the real server.
+
 ## What is emulated
 
 | Area | Commands | Behaviour |
@@ -189,7 +198,7 @@ Taking a snapshot of a device is the same copy in the other direction (`adb pull
 | Nickname | `050014`, `050015` | The name the player sets is stored per game; otherwise the recorded name is used |
 | Ads | host block, `050018` | Ad hosts are blocked; the reward claim returns `False` |
 | Exchange | `060004` | Points to rubies or tickets, tracked in the state file |
-| Language | `070001`, `070002` | Text packs replayed from recordings. Unrecorded languages are refused (see Languages) |
+| Language | `070001`, `070002` | Text packs replayed from recordings. Unrecorded languages are refused (see **Languages**) |
 | Premium choices | `080001`, `080002` | Price comes from the `080001` row; bought choices are remembered and flagged as owned |
 | Anything else | | Replays the last recorded reply, or prints `UNKNOWN command` |
 
@@ -233,7 +242,7 @@ The API side works the same way. API calls are never forwarded, so a command the
 | `ticket_spent`, `ticket_earned` | Running totals |
 | `bought` | Premium choices already purchased |
 | `unlocked` | Chapters already charged (`episode:chapter`) |
-| `nickname` | The name the player last set. |
+| `nickname` | The name the player last set |
 
 Displayed balance = config value, minus spent, plus earned, never below 0.
 
@@ -251,27 +260,44 @@ The first-launch recording is covered in **Before you start**. The same method f
 
 ## Troubleshooting
 
+### Emulator and proxy setup
+
 | Symptom | Likely cause and fix |
 |---|---|
+| `adb devices` shows nothing | ADB debugging is off for that instance, or the instance isn't running |
+| `su: not found`, or `Read-only file system` when installing the certificate | Root permission or the writable system disk setting is off for that instance. Fix it and restart |
+| Nothing shows up in mitmweb | Wrong PC address in the proxy setting, or the firewall blocks port 8080 |
+| TLS handshake errors in mitmweb naming the game's hosts | The certificate isn't installed as a system certificate |
+| TLS errors naming `middledata.ldplayer.net` | LDPlayer's own traffic. Ignore it |
 | `No module named 'msgpack'` in mitmweb | mitmweb is not running from the venv. Run `pip install -r requirements.txt` inside the venv and start `mitmweb` from it |
-| `Error while trying to access CDN server`, stuck loading | A file is missing. Check the terminal for `cdn MISSING` and see **The real-CDN fallback** |
-| `cdn MISSING ... -> real CDN, will cache` then `cached` | Working as designed: the file was fetched once from the real CDN and stored in `cdn_extra_<name>` |
+
+### The server starts, but the game won't load
+
+| Symptom | Likely cause and fix |
+|---|---|
+| Terminal says `"package" is missing or still a placeholder` | Set `package` in `fake_config.json` to the game's real package name (see **Finding a game's package name**) |
+| Connection or server error, and the terminal says `the game logging in is X` or that the recordings are for a different package | `package` doesn't match the game you opened. Set it to the right name and restart mitmweb |
+| Terminal says `no recording in this folder belongs to ...` | No first-launch recording exists for that game. Record one, or fix `package` |
+| `skipped recording <name> (...)` | Informational. That recording belongs to a different game |
+| `NOTE: old shared folder 'cdn_extra' found and ignored` | If its files belong to this game, rename it to the `cdn_extra_<name>` shown in the message |
+| Game restarts at the language screen | Normal after clearing the app's data. Pick the language you recorded |
+| `Error while trying to access CDN server`, stuck loading | A file is missing. Check the terminal for `cdn MISSING` (see **The real-CDN fallback**) |
+
+### Files and replies
+
+| Symptom | Likely cause and fix |
+|---|---|
+| `cdn MISSING ... -> real CDN, will cache`, then `cached` | Working as designed: the file was fetched once from the real CDN and saved in `cdn_extra_<name>` |
 | `cdn MISSING` and no `cached` line | The real CDN refused it or is gone. Record that file from a real session while the server is up |
 | `UNKNOWN command XXXXXX` | A reply you have not recorded. Record a session through the real server, or find the response shape in the il2cpp dump |
-| `REFUSED: language N was never recorded` | The game asked for a language that wasn’t recorded (see `Languages`) |
-| `NOTE: old shared folder 'cdn_extra' found and ignored` | Rename it to the `cdn_extra_<name>` shown in the message, if its files belong to that game |
-| `skipped recording <name> (...)` | Informational. That recording belongs to a different game |
+
+### While playing
+
+| Symptom | Likely cause and fix |
+|---|---|
 | Game returns to chapter 1 after closing | The saved chapter was overwritten. `050008` must only move progress forward, and `chapter_id` in the save must match the `data` blob |
 | Ad button loops forever | The ad hosts are not being blocked. Restart mitmweb and the game |
-| Game restarts at the language screen | Normal after clearing the app's data. Pick the same language |
-| Game shows a connection or server error, and the terminal says `the game logging in is X`, or the recordings are for a different package | `package` doesn’t match the game you opened. Set `package` to the game’s package name and restart mitmweb. If no recording belongs to it, record a first launch |
-| Terminal says `"package" is missing or still a placeholder` | Set `package` in `fake_config.json` to the game’s real package name (see Finding a game’s package name) |
-| `adb devices` shows nothing	| ADB debugging is off for that instance, or the instance isn’t running |
-| `su: not found`, or `Read-only file system` when installing the certificate | Root permission or the writable system disk setting is off for that instance. Fix it and restart |
-| TLS handshake errors in mitmweb naming the game’s hosts | The certificate isn’t installed as a system certificate |
-| TLS errors naming `middledata.ldplayer.net` | LDPlayer’s own traffic. Ignore it |
-| Nothing shows up in mitmweb	| Wrong PC address in the proxy setting, or the firewall blocks port 8080 |
-| Terminal says `no recording in this folder belongs to ...` | Record a first launch for that game, or fix `package` |
+| `REFUSED: language N was never recorded` | The game asked for a language that wasn't recorded (see **Languages**) |
 
 ## Doing this for another game from the same studio
 
