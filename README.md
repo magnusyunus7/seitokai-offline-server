@@ -120,7 +120,11 @@ The server answers the game's API only from your own recordings. Without a recor
    ```
 3. Open the game and pick the language you want to keep. Only recorded languages work later (see **Languages**). Record each game in its own mitmweb session, because a recording is assigned to the first game found in it.
 4. Close the game, then press Ctrl+C in the terminal so the file saves.
-5. Pull the game's data folder from the device (`adb pull`) into `snapshots/`, so the downloaded files are also kept locally.
+5. Pull the game's data folder from the device into `snapshots/`, so the downloaded files are also kept locally. The destination folder must not exist yet:
+   ```powershell
+   cd C:\LDPlayer\LDPlayer9
+   .\adb.exe pull /sdcard/Android/data/<package>/files "<repo>\new_version\snapshots\<snap>\external"
+   ```
 6. Set `package` in `fake_config.json` and start the server (see **Daily use**).
 
 The recording contains your login token and account ID, so keep it private and never share it. After this, files you have not downloaded yet can be filled in by the CDN fallback while the real CDN is up.
