@@ -6,17 +6,21 @@ Run it instead of plain mitmweb (same proxy setup as before):
 
 Put this file in your `captures` folder. What it does:
 
-  * learns the server's replies from every *.flow capture in this folder
+  * learns the server's replies from the *.flow recordings that belong to the
+    configured game ("package" in fake_config.json)
   * answers  api.drama-prod.interactive-studio.jp/oauth/token  and  /api  itself,
     WITHOUT forwarding them to the real server (so nothing you do reaches the real
     account: tickets, saves and chapter starts all stay local)
-  * answers  cdn.drama-prod.interactive-studio.jp/<package>/<uuid>  from the
-    hash-named files in your data folder; unknown hashes get a 404
-  * lets every other request (ads, Google, Facebook, the CDN's ad images) pass through
+  * answers  cdn.drama-prod.interactive-studio.jp/<package>/<uuid>  from your data
+    folder and cdn_extra_<name>; a file it doesn't have is fetched once from the
+    real CDN and cached
+  * blocks the ad network, and lets every other request (Google, Facebook, the
+    CDN's ad images) pass through
 
-Edit fake_config.json (created on first run) to hard-code ticket / ruby / point.
-Progress is kept in fake_state.json.  Both stay on your PC - keep them out of git,
-because the captures it reads contain your login token and account id.
+Edit fake_config.json (created on first run) to set the package name and the
+ticket / ruby / point balances. Progress is kept in fake_state.json. Both stay on
+your PC - keep them out of git, because the captures it reads contain your login
+token and account id.
 """
 import datetime
 import glob
@@ -36,6 +40,13 @@ API_HOST = "api.drama-prod.interactive-studio.jp"
 CDN_HOST = "cdn.drama-prod.interactive-studio.jp"
 AD_HOSTS = ("mediation.unity3d.com", "unityads.unity3d.com", "offerwall.unity3d.com",
             "unity3dusercontent.com", "supersonicads.com", "ironsrc.com")
+
+
+def _now():
+    try:
+        return datetime.datetime.now(ZoneInfo("Asia/Singapore"))
+    except Exception:
+        return datetime.datetime.now()
 
 
 def _read_pkg():
@@ -88,6 +99,7 @@ DEFAULT_CONFIG = {
     "ticket": None,      # a number here is returned on every profile reply
     "ruby": None,
     "point": None,
+    "package": "jp.interactive_studio.<name>"
 }
 
 cfg = {}
@@ -126,10 +138,22 @@ def _save_state():
     if not isinstance(games, dict):
         games = {}
     games[_state_key()] = state                    # replace only this game's section
+    data = json.dumps({"games": games}, indent=1)
     tmp = STATE_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"games": games}, f, indent=1)
-    os.replace(tmp, STATE_PATH)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(data)
+        for i in range(6):                         # the target can be locked for a moment on Windows
+            try:
+                os.replace(tmp, STATE_PATH)
+                return
+            except PermissionError:
+                time.sleep(0.1 * (i + 1))
+        with open(STATE_PATH, "w", encoding="utf-8") as f:     # last resort: write in place
+            f.write(data)
+    except OSError as e:
+        print(f"[fake] WARNING: could not save fake_state.json ({e}). Close anything that has it open "
+              f"(editor, preview, sync). It will be retried on the next save.")
 
 
 def _bal(res, delta):                    # delta < 0 = spent, delta > 0 = earned
@@ -365,7 +389,7 @@ def _answer(cid, c):
                 rec[k] = _toint(c[k])
         if "data" in c:
             rec["data"] = c["data"]
-        rec["last_played_at"] = datetime.datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d %H:%M:%S")
+        rec["last_played_at"] = _now().strftime("%Y-%m-%d %H:%M:%S")
         state["saves"][slot] = rec
         _save_state()
         return []
@@ -429,8 +453,7 @@ def _answer(cid, c):
         pack = lang_replies.get(lang)
         if pack is None:
             raise _Refuse(f"language {lang} was never recorded (recorded: {sorted(lang_replies) or 'none'}). "
-                          "Restore usrdata/cfg.dat from your snapshot to return to a recorded language, "
-                          "or record that language through the real server.")
+                          "To add it, switch to it while recording through the real server.")
         return pack
     if cid == "080001":                  # premium list: flag bought products
         bought = set(state.get("bought", []))
@@ -507,7 +530,7 @@ def _login_pkg(flow):
         return None
     for vals in form.values():
         for v in vals:
-            if re.fullmatch(r"[a-z0-9_]+(\.[a-z0-9_]+){2,}", v):    # looks like a package name
+            if re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){2,}", v):    # looks like a package name
                 return v
     if not _login_warned:                                           # field layout differs: show names only
         _login_warned = True
@@ -524,21 +547,28 @@ def request(flow: http.HTTPFlow):
         flow.kill()
         return
     if host == API_HOST:
-        _ensure_loaded()
-        if _blocked:
-            flow.response = http.Response.make(503, b"wrong game folder or package", {"Content-Type": "text/plain"})
-            return
-        if flow.request.path.startswith("/oauth/token"):
-            lp = _login_pkg(flow)
-            if lp and lp != PKG:
-                print(f'[fake] WARNING: the game logging in is "{lp}", but fake_config.json says '
-                      f'"{PKG}". Set "package" to "{lp}" and restart mitmweb.')
-                flow.response = http.Response.make(503, b"wrong package", {"Content-Type": "text/plain"})
+        try:
+            _ensure_loaded()
+            if _blocked:
+                flow.response = http.Response.make(503, b"wrong game folder or package", {"Content-Type": "text/plain"})
                 return
-            print("[fake] login -> recorded token")
-            flow.response = http.Response.make(200, token_body or b"{}", {"Content-Type": token_ctype})
-        elif flow.request.path.startswith("/api"):
-            _api(flow)
+            if flow.request.path.startswith("/oauth/token"):
+                lp = _login_pkg(flow)
+                if lp and lp != PKG:
+                    print(f'[fake] WARNING: the game logging in is "{lp}", but fake_config.json says '
+                          f'"{PKG}". Set "package" to "{lp}" and restart mitmweb.')
+                    flow.response = http.Response.make(503, b"wrong package", {"Content-Type": "text/plain"})
+                    return
+                print("[fake] login -> recorded token")
+                flow.response = http.Response.make(200, token_body or b"{}", {"Content-Type": token_ctype})
+            elif flow.request.path.startswith("/api"):
+                _api(flow)
+            else:                        # anything else on the API host stays local too
+                print(f"[fake] unhandled API path {flow.request.path} -> 404")
+                flow.response = http.Response.make(404, b"", {})
+        except Exception as e:
+            print(f"[fake] ERROR while answering {flow.request.path}: {e!r}")
+            flow.response = http.Response.make(500, b"fake server error", {"Content-Type": "text/plain"})
     elif host == CDN_HOST and flow.request.path.startswith(f"/{PKG}/"):
         _ensure_loaded()
         if _blocked:
