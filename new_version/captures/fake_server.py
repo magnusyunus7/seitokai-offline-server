@@ -362,7 +362,7 @@ def _answer(cid, c):
         print(f"[fake] {cid} req { {k: (str(v)[:70] if k == 'data' else v) for k, v in c.items() if k != 'id'} }")
     if cid == "011002":                  # a list with one 8-character string
         return replies.get("011002") or ["00000000"]
-    if cid in ("011006", "050017"):      # empty list on the real server (volume settings, chapter progress ping)
+    if cid in ("011006", "050009", "050017"):      # empty list on the real server (volume settings, chapter progress ping)
         return []
     if cid == "013001":                  # slot spin: replay the recorded result, credit its points
         r = replies.get("013001")
