@@ -127,6 +127,8 @@ The server answers the game's API only from your own recordings. Without a recor
    ```
 6. Set `package` in `fake_config.json` and start the server (see **Daily use**).
 
+One first launch is enough, even for a game with several seasons (see **Games with several seasons**).
+
 The recording contains your login token and account ID, so keep it private and never share it. After this, files you have not downloaded yet can be filled in by the CDN fallback while the real CDN is up.
 
 ## Configuration
@@ -186,6 +188,16 @@ Only languages that were recorded can be used. Each language has its own text pa
 
 **Reminder:** if the player switches to a language that wasn't recorded, the server refuses the request, the game shows its error, and the terminal prints `REFUSED: language N was never recorded`. The game stores the chosen language on the device (in `usrdata/cfg.dat`), so it can keep asking for that language on later launches. Only switch to languages you recorded. To add another language, switch to it while recording through the real server.
 
+## Games with several seasons
+
+Some games, such as After School Sparkles, have several seasons. To the server, each season is an episode of the same game. They share one package, one catalog and one file list.
+
+- **One first-launch recording covers every season.** The catalog (`020001`) and the file list (`020002`) recorded at boot already list every season, whichever season you picked while recording. You do not need a recording per season.
+- **Each season keeps its own save,** stored as `<episode_id>:<slot>` in `fake_state.json` (see **State file**). Playing one season never moves or overwrites another, so you can switch freely in the game's season menu.
+- **A season you have not played yet starts fresh.** If the recording holds a save for that season, the game continues from it. Otherwise the game creates the season's save the first time it saves.
+- **Each season's files still have to come from somewhere.** A recording only holds the files downloaded while it was made, usually the first chapter of the season you picked. Files for the other seasons come from the data folder, `cdn_extra_<name>/` or the CDN fallback (see **The real-CDN fallback**). To keep every season locally, play each one once while the real CDN is up.
+- **Keep only one first-launch recording per game in `captures`.** When several recordings match the package, the server learns all of them and the newest reply wins for each command, which can mix seasons up. Keep spare recordings in `old_flows/`, which is ignored.
+
 ## What is emulated
 
 | Area | Commands | Behaviour |
@@ -196,9 +208,9 @@ Only languages that were recorded can be used. Each language has its own text pa
 | Slot machine | `013001` | Point rewards are tracked in the state file |
 | File URLs | `020002` | Recorded URLs are reused; for unseen hashes, URLs pointing back at this server are invented |
 | Profile | `050001` | Recorded reply, with `ticket`, `ruby`, `point` overridden from the config and adjusted by the state file |
-| Cloud save | `050004`, `050005` | Saves are stored per slot; the game's position comes from the saved `data` blob |
+| Cloud save | `050004`, `050005` | One save per season (episode) and slot. `050005` returns every season's save, most recent first; the game's position comes from the saved `data` blob |
 | Restart story | `050006` | Logged only. The game uploads a fresh chapter 1 save right after |
-| Chapter start | `050008` | Progress only moves forward. A chapter costs its listed tickets once, then replays are free |
+| Chapter start | `050008` | Progress only moves forward within a season. A chapter costs its listed tickets once, then replays are free |
 | Nickname | `050014`, `050015` | The name the player sets is stored per game; otherwise the recorded name is used |
 | Ads | host block, `050018` | Ad hosts are blocked; the reward claim returns `False` |
 | Exchange | `060004` | Points to rubies or tickets, tracked in the state file |
@@ -240,7 +252,7 @@ The API side works the same way. API calls are never forwarded, so a command the
 
 | Key | Meaning |
 |---|---|
-| `saves` | Per-slot cloud save: chapter, command, `data` blob, timestamps |
+| `saves` | One cloud save per season and slot, keyed `<episode_id>:<slot>`: chapter, command, `data` blob, timestamps |
 | `ruby_spent`, `ruby_earned` | Running totals |
 | `point_spent`, `point_earned` | Running totals |
 | `ticket_spent`, `ticket_earned` | Running totals |
@@ -250,7 +262,9 @@ The API side works the same way. API calls are never forwarded, so a command the
 
 Displayed balance = config value, minus spent, plus earned, never below 0.
 
-To jump to a chapter: stop the server, open `fake_state.json`, and find the save under `games` > `<package>` > `saves` > `<slot>`. Set `chapter_id` to the chapter number, and inside the `data` string set `"chapterId":"ChN"` and `"commandId":null` to match. Keep a backup first.
+Saves from older versions were kept per slot only, so all seasons of a game shared one save. On the first run they are moved to the season named in the save (its `story_id`), and the old file is kept as `fake_state.json.pre-seasons`.
+
+To jump to a chapter: stop the server, open `fake_state.json`, and find the save under `games` > `<package>` > `saves` > `<episode_id>:<slot>`. Set `chapter_id` to the chapter number, and inside the `data` string set `"chapterId":"ChN"` and `"commandId":null` to match. Keep a backup first.
 
 ## Recording what is missing
 
@@ -302,6 +316,7 @@ The first-launch recording is covered in **Before you start**. The same method f
 | Game returns to chapter 1 after closing | The saved chapter was overwritten. `050008` must only move progress forward, and `chapter_id` in the save must match the `data` blob |
 | Ad button loops forever | The ad hosts are not being blocked. Restart mitmweb and the game |
 | `REFUSED: language N was never recorded` | The game asked for a language that wasn't recorded (see **Languages**) |
+| Picking a season opens a different season | More than one recording for the game is in `captures`, or the saves come from an older version. Keep one first-launch recording, and on the first run check the terminal for `save for slot N moved to season ...` |
 
 ## Doing this for another game from the same studio
 
