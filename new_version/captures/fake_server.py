@@ -326,6 +326,8 @@ def _ensure_loaded():
     if os.path.isdir(legacy):
         print(f"[fake] NOTE: old shared folder 'cdn_extra' found and ignored. If its files belong to "
               f"this game, rename it to '{os.path.basename(EXTRA_DIR)}'.")
+    if not _blocked:
+        _migrate_saves()
     data_dir = _pick_data_dir()
     nfiles = len(os.listdir(data_dir)) if data_dir else 0
     print(f"[fake] learned {total} api calls, {len(replies)} command ids, "
@@ -350,11 +352,57 @@ def _toint(v):
     return int(v) if isinstance(v, str) and v.lstrip("-").isdigit() else v
 
 
-def _save_record(slot):
-    rec = state["saves"].get(str(slot))
-    if rec is None:
-        rec = dict((replies.get("050005") or [{}])[0])
-    return rec
+def _save_key(ep, slot):                 # one cloud save per season (episode) and slot, like the real server
+    return f"{ep or 0}:{slot}"
+
+
+def _recorded_saves():
+    out = {}
+    for r in replies.get("050005") or []:
+        if isinstance(r, dict):
+            out[_save_key(_toint(r.get("episode_id")), _toint(r.get("save_slot", 1)))] = r
+    return out
+
+
+def _save_record(ep, slot):
+    key = _save_key(ep, slot)
+    rec = state["saves"].get(key) or _recorded_saves().get(key)
+    return dict(rec) if rec is not None else None
+
+
+def _save_template():                    # a recorded save without its season fields, for a season never saved
+    rec = next((r for r in replies.get("050005") or [] if isinstance(r, dict)), {})
+    return {k: v for k, v in rec.items()
+            if k not in ("episode_id", "story_id", "chapter_id", "command_id", "data", "point")}
+
+
+def _played_at(rec):                     # the real server sends unix time, this script writes a date
+    v = str(rec.get("last_played_at") or "")
+    if v.isdigit():
+        return int(v)
+    try:
+        return int(datetime.datetime.strptime(v, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_now().tzinfo).timestamp())
+    except ValueError:
+        return 0
+
+
+def _migrate_saves():
+    """Older versions kept one save per slot for the whole game, so every season shared it."""
+    old = [k for k in state["saves"] if ":" not in str(k)]
+    if not old:
+        return
+    if os.path.exists(STATE_PATH) and not os.path.exists(STATE_PATH + ".pre-seasons"):
+        shutil.copy(STATE_PATH, STATE_PATH + ".pre-seasons")
+    eps = (replies.get("020001") or {}).get("episode_list") or []
+    by_story = {e.get("story_id"): e.get("episode_id") for e in eps if isinstance(e, dict)}
+    for k in old:
+        rec = state["saves"].pop(k)
+        ep = by_story.get(rec.get("story_id"), rec.get("episode_id"))   # story_id is uploaded with the data blob
+        rec["episode_id"] = ep
+        state["saves"][_save_key(ep, _toint(rec.get("save_slot", k)))] = rec
+        print(f"[fake] save for slot {k} moved to season (episode) {ep} "
+              f"(backup: fake_state.json.pre-seasons)")
+    _save_state()
 
 
 def _answer(cid, c):
@@ -380,9 +428,10 @@ def _answer(cid, c):
         return out
     if cid == "050001":                  # profile
         return _profile()
-    if cid == "050004":                  # save upload
+    if cid == "050004":                  # save upload, into that season's save
         slot = str(_toint(c.get("save_slot", 1)))
-        rec = _save_record(slot) or {}
+        ep = _toint(c.get("episode_id"))
+        rec = _save_record(ep, slot) or _save_template()
         for k in ("drama_id", "episode_id", "story_id", "chapter_id", "command_id",
                   "save_slot", "point"):
             if k in c:
@@ -390,24 +439,29 @@ def _answer(cid, c):
         if "data" in c:
             rec["data"] = c["data"]
         rec["last_played_at"] = _now().strftime("%Y-%m-%d %H:%M:%S")
-        state["saves"][slot] = rec
+        state["saves"][_save_key(ep, slot)] = rec
         _save_state()
         return []
-    if cid == "050005":                  # cloud save
-        rec = _save_record(c.get("save_slot", 1))
-        print(f"[fake] 050005 reply { {k: (str(v)[:90] if k == 'data' else v) for k, v in (rec or {}).items()} }")
-        return [rec] if rec else []
+    if cid == "050005":                  # cloud saves: every season's save, most recent first
+        saves = _recorded_saves()
+        saves.update(state["saves"])
+        slot = str(_toint(c["save_slot"])) if "save_slot" in c else None
+        recs = sorted((r for r in saves.values() if slot is None or str(r.get("save_slot")) == slot),
+                      key=_played_at, reverse=True)
+        for rec in recs:
+            print(f"[fake] 050005 reply { {k: (str(v)[:90] if k == 'data' else v) for k, v in rec.items()} }")
+        return recs
     if cid == "050006":                  # restart story; the game uploads a fresh ch1 save (050004) right after
         print(f"[fake] restart story, slot {c.get('save_slot', 1)}")
         return []
     if cid == "050008":                  # start / unlock a chapter
         slot = str(_toint(c.get("save_slot", 1)))
         ep, ch = _toint(c.get("episode_id")), _toint(c.get("chapter_id"))
-        rec = _save_record(slot)
-        if rec:
-            if (ep or 0, ch or 0) > (rec.get("episode_id") or 0, rec.get("chapter_id") or 0):
-                rec["episode_id"], rec["chapter_id"] = ep, ch    # only advance, never go back
-            state["saves"][slot] = rec
+        rec = _save_record(ep, slot)
+        if rec:                          # a season never saved gets its save from the 050004 that follows
+            if (ch or 0) > (rec.get("chapter_id") or 0):
+                rec["chapter_id"] = ch   # only advance within this season, never go back
+            state["saves"][_save_key(ep, slot)] = rec
         key = f"{ep}:{ch}"
         unlocked = state.setdefault("unlocked", [])
         if key not in unlocked:          # charge once per chapter, never on replays
