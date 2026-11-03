@@ -36,6 +36,8 @@ from zoneinfo import ZoneInfo
 from urllib.parse import parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(HERE, "fake_config.json")
+STATE_PATH = os.path.join(HERE, "fake_state.json")
 API_HOST = "api.drama-prod.interactive-studio.jp"
 CDN_HOST = "cdn.drama-prod.interactive-studio.jp"
 AD_HOSTS = ("mediation.unity3d.com", "unityads.unity3d.com", "offerwall.unity3d.com",
@@ -50,12 +52,11 @@ def _now():
 
 
 def _read_pkg():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_config.json")
     try:
-        with open(path, encoding="utf-8-sig") as f:
+        with open(CONFIG_PATH, encoding="utf-8-sig") as f:
             p = json.load(f).get("package")
     except Exception as e:
-        print(f"[fake] WARNING: could not read {path}: {e}")
+        print(f"[fake] WARNING: could not read {CONFIG_PATH}: {e}")
         return ""
     if not isinstance(p, str) or not p.strip() or "<" in p:
         print('[fake] WARNING: "package" is missing or still a placeholder in fake_config.json. '
@@ -83,17 +84,20 @@ class _Refuse(Exception):
     pass
 
 
-def _check_pkg(path):
+def _cdn_pkg(path):                      # package a CDN path belongs to; None for ad images and empty paths
     seg = path.lstrip("/").split("/", 1)[0]
-    if not seg or seg == "adimage" or seg == PKG or seg in _warned:
+    return seg if seg and seg != "adimage" else None
+
+
+def _check_pkg(path):
+    seg = _cdn_pkg(path)
+    if not seg or seg == PKG or seg in _warned:
         return
     _warned.add(seg)
     print(f'[fake] WARNING: the game requested CDN files for package "{seg}", but fake_config.json says '
           f'"{PKG or "(not set)"}". Set "package" to "{seg}" and restart mitmweb.')
 
 
-CONFIG_PATH = os.path.join(HERE, "fake_config.json")
-STATE_PATH = os.path.join(HERE, "fake_state.json")
 DEFAULT_CONFIG = {
     "data_dir": "",      # folder holding the hash-named files; empty = auto-detect
     "ticket": None,      # a number here is returned on every profile reply
@@ -184,19 +188,29 @@ def _register_urls(h, urls):
     urls_by_hash[h] = urls
     for u in urls:
         if isinstance(u, str):
-            uuid_to_hash[u.rstrip("/").rsplit("/", 1)[-1]] = h
+            uuid_to_hash[_uuid(u)] = h
 
 
 def _map_urls(o):                        # url + hash pairs outside 020002 (e.g. manifest_list)
     if isinstance(o, dict):
         u, h = o.get("url"), o.get("hash")
         if isinstance(u, str) and isinstance(h, str) and CDN_HOST in u:
-            uuid_to_hash[u.rstrip("/").rsplit("/", 1)[-1]] = h
+            uuid_to_hash[_uuid(u)] = h
         for v in o.values():
             _map_urls(v)
     elif isinstance(o, list):
         for v in o:
             _map_urls(v)
+
+
+def _cache_cdn(path, body):              # keep a CDN body in EXTRA_DIR; False if that file already exists
+    fp = os.path.join(EXTRA_DIR, _uuid(path))
+    if os.path.exists(fp):
+        return False
+    os.makedirs(EXTRA_DIR, exist_ok=True)
+    with open(fp, "wb") as f:
+        f.write(body)
+    return True
 
 
 def _learn(path):
@@ -208,11 +222,7 @@ def _learn(path):
                 continue
             if fl.request.pretty_host == CDN_HOST:        # keep real CDN bodies from the flows
                 if fl.response.status_code == 200 and fl.request.path.startswith(f"/{PKG}/"):
-                    fp = os.path.join(EXTRA_DIR, _uuid(fl.request.path))
-                    if not os.path.exists(fp):
-                        os.makedirs(EXTRA_DIR, exist_ok=True)
-                        with open(fp, "wb") as out:
-                            out.write(fl.response.content)
+                    _cache_cdn(fl.request.path, fl.response.content)
                 continue
             if fl.request.pretty_host != API_HOST:
                 continue
@@ -231,13 +241,20 @@ def _learn(path):
                 replies.update(resp)
                 _map_urls(resp)
                 for c in cmds:           # file-URL lookups: hash list in, URL lists out
-                    if isinstance(c, dict) and c.get("id") == "020002" and "020002" in resp:
-                        hl, ul = c.get("hash_list", []), resp["020002"]
-                        for h, urls in zip(hl, ul):
+                    if not isinstance(c, dict):
+                        continue
+                    if c.get("id") == "020002" and "020002" in resp:
+                        for h, urls in zip(c.get("hash_list", []), resp["020002"]):
                             _register_urls(h, urls)
-                    if isinstance(c, dict) and c.get("id") == "070002" and "070002" in resp:
+                    if c.get("id") == "070002" and "070002" in resp:
                         lang_replies[str(c.get("language_id"))] = resp["070002"]
     return n
+
+
+def _manifest_pkgs(resp):                # package names in the manifest urls of a reply dict
+    ml = (resp.get("020001") or {}).get("manifest_list") or []
+    return {e["url"].split("/")[3] for e in ml
+            if isinstance(e, dict) and isinstance(e.get("url"), str) and e["url"].count("/") >= 4}
 
 
 def _flow_pkgs(path):
@@ -250,8 +267,8 @@ def _flow_pkgs(path):
                     continue
                 h = fl.request.pretty_host
                 if h == CDN_HOST:
-                    seg = fl.request.path.lstrip("/").split("/", 1)[0]
-                    if seg and seg != "adimage":
+                    seg = _cdn_pkg(fl.request.path)
+                    if seg:
                         found.add(seg)
                 elif h == API_HOST and fl.response is not None and fl.request.path.startswith("/api"):
                     try:
@@ -259,10 +276,7 @@ def _flow_pkgs(path):
                     except Exception:
                         continue
                     if isinstance(resp, dict):
-                        for e in (resp.get("020001") or {}).get("manifest_list") or []:
-                            u = e.get("url") if isinstance(e, dict) else None
-                            if isinstance(u, str) and u.count("/") >= 4:
-                                found.add(u.split("/")[3])
+                        found |= _manifest_pkgs(resp)
                 if found:
                     break                      # first clue is enough, which keeps startup fast
     except Exception:
@@ -295,23 +309,19 @@ def _ensure_loaded():
     state.setdefault("saves", {})
     total = 0
     matched = 0
-    skipped = []
     for p in sorted(glob.glob(os.path.join(HERE, "*.flow")), key=os.path.getmtime):   # oldest first
         pk = _flow_pkgs(p)
         if PKG and PKG in pk:
             total += _learn(p)
             matched += 1
         else:
-            skipped.append((os.path.basename(p), ", ".join(sorted(pk)) or "no game detected"))
-    for name, why in skipped:
-        print(f"[fake] skipped recording {name} ({why})")
+            why = ", ".join(sorted(pk)) or "no game detected"
+            print(f"[fake] skipped recording {os.path.basename(p)} ({why})")
     if PKG and matched == 0:
         _blocked = True
         print(f'[fake] WARNING: no recording in this folder belongs to "{PKG}". '
               f'Record a first launch for it, or fix "package".')
-    ml = (replies.get("020001") or {}).get("manifest_list") or []
-    seen = {e["url"].split("/")[3] for e in ml
-            if isinstance(e, dict) and isinstance(e.get("url"), str) and e["url"].count("/") >= 4}
+    seen = _manifest_pkgs(replies)
     if not PKG:
         _blocked = True
     elif seen and PKG not in seen:
@@ -320,7 +330,7 @@ def _ensure_loaded():
               f'"{PKG}". Start the server from that game\'s own folder, or fix the package.')
     if _blocked:
         print("[fake] API and CDN requests will be refused until this is fixed.")
-    if PKG and not _blocked:
+    if not _blocked:
         os.makedirs(EXTRA_DIR, exist_ok=True)          # created on first use
     legacy = os.path.join(HERE, "cdn_extra")
     if os.path.isdir(legacy):
@@ -342,7 +352,6 @@ def _profile():
     for k in ("ticket", "ruby", "point"):
         if cfg.get(k) is not None:
             p[k] = cfg[k]
-    for k in ("ruby", "point", "ticket"):
         if isinstance(p.get(k), int):
             p[k] = max(0, p[k] - state.get(f"{k}_spent", 0) + state.get(f"{k}_earned", 0))
     return p
@@ -388,7 +397,7 @@ def _played_at(rec):                     # the real server sends unix time, this
 
 def _migrate_saves():
     """Older versions kept one save per slot for the whole game, so every season shared it."""
-    old = [k for k in state["saves"] if ":" not in str(k)]
+    old = [k for k in state["saves"] if ":" not in k]
     if not old:
         return
     if os.path.exists(STATE_PATH) and not os.path.exists(STATE_PATH + ".pre-seasons"):
@@ -540,6 +549,10 @@ def _answer(cid, c):
     return []
 
 
+def _plain(flow, status, body):
+    flow.response = http.Response.make(status, body, {"Content-Type": "text/plain"})
+
+
 def _api(flow):
     cmds = _unpack(flow.request.content)
     out = dict(by_shape.get(_shape(cmds), {}))   # identical past request: start from its reply
@@ -549,7 +562,7 @@ def _api(flow):
                 out[c["id"]] = _answer(c["id"], c)
     except _Refuse as e:
         print(f"[fake] REFUSED: {e}")
-        flow.response = http.Response.make(503, b"not available offline", {"Content-Type": "text/plain"})
+        _plain(flow, 503, b"not available offline")
         return
     ids = [c.get("id") for c in cmds if isinstance(c, dict)]
     print(f"[fake] api  {' '.join(str(i) for i in ids)}")
@@ -604,14 +617,14 @@ def request(flow: http.HTTPFlow):
         try:
             _ensure_loaded()
             if _blocked:
-                flow.response = http.Response.make(503, b"wrong game folder or package", {"Content-Type": "text/plain"})
+                _plain(flow, 503, b"wrong game folder or package")
                 return
             if flow.request.path.startswith("/oauth/token"):
                 lp = _login_pkg(flow)
                 if lp and lp != PKG:
                     print(f'[fake] WARNING: the game logging in is "{lp}", but fake_config.json says '
                           f'"{PKG}". Set "package" to "{lp}" and restart mitmweb.')
-                    flow.response = http.Response.make(503, b"wrong package", {"Content-Type": "text/plain"})
+                    _plain(flow, 503, b"wrong package")
                     return
                 print("[fake] login -> recorded token")
                 flow.response = http.Response.make(200, token_body or b"{}", {"Content-Type": token_ctype})
@@ -622,7 +635,7 @@ def request(flow: http.HTTPFlow):
                 flow.response = http.Response.make(404, b"", {})
         except Exception as e:
             print(f"[fake] ERROR while answering {flow.request.path}: {e!r}")
-            flow.response = http.Response.make(500, b"fake server error", {"Content-Type": "text/plain"})
+            _plain(flow, 500, b"fake server error")
     elif host == CDN_HOST and flow.request.path.startswith(f"/{PKG}/"):
         _ensure_loaded()
         if _blocked:
@@ -634,9 +647,5 @@ def request(flow: http.HTTPFlow):
 def response(flow: http.HTTPFlow):
     if (flow.metadata.get("passthrough") and flow.response
             and flow.response.status_code == 200 and flow.response.content):
-        fp = os.path.join(EXTRA_DIR, _uuid(flow.request.path))
-        if not os.path.exists(fp):
-            os.makedirs(EXTRA_DIR, exist_ok=True)
-            with open(fp, "wb") as f:
-                f.write(flow.response.content)
+        if _cache_cdn(flow.request.path, flow.response.content):
             print(f"[fake] cdn  cached {_uuid(flow.request.path)[:8]}.. ({len(flow.response.content)} bytes)")
