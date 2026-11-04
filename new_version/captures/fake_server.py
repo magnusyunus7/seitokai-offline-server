@@ -126,7 +126,7 @@ def _uuid(path):
 
 def _load_json(path, default):
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             return json.load(f)
     except Exception:
         return default
@@ -136,9 +136,31 @@ def _state_key():
     return PKG or "_unset"
 
 
+def _read_state():
+    """Contents of fake_state.json, {} only if it doesn't exist yet. Raises OSError or ValueError if unreadable."""
+    for i in range(6):                             # the file can be locked for a moment on Windows
+        try:
+            with open(STATE_PATH, encoding="utf-8-sig") as f:
+                raw = json.load(f)
+            if not isinstance(raw, dict):
+                raise ValueError("not a JSON object")
+            return raw
+        except FileNotFoundError:
+            return {}
+        except PermissionError:
+            if i == 5:
+                raise
+            time.sleep(0.1 * (i + 1))
+
+
 def _save_state():
-    disk = _load_json(STATE_PATH, {})              # re-read, so another running game's section isn't clobbered
-    games = disk.get("games") if isinstance(disk, dict) else None
+    try:
+        disk = _read_state()                       # re-read, so another running game's section isn't clobbered
+    except (OSError, ValueError) as e:             # saving blind would erase every other game's saves
+        print(f"[fake] WARNING: did not save, because fake_state.json could not be read ({e}). Close anything "
+              f"that has it open (editor, preview, sync), or repair it. It will be retried on the next save.")
+        return
+    games = disk.get("games")
     if not isinstance(games, dict):
         games = {}
     games[_state_key()] = state                    # replace only this game's section
@@ -284,24 +306,31 @@ def _flow_pkgs(path):
     return found
 
 
-def _ensure_loaded():
-    global cfg, state, data_dir, _loaded, _blocked
-    if _loaded:
-        return
-    _loaded = True
+def _load_all():
+    global cfg, state, data_dir, _blocked
     cfg = _load_json(CONFIG_PATH, None)
-    if cfg is None:
+    if not isinstance(cfg, dict):
+        if os.path.exists(CONFIG_PATH):            # never replace a config the user can still fix
+            print(f"[fake] WARNING: could not read {CONFIG_PATH}, so it was left as it is. "
+                  f"Using default settings until it is fixed and mitmweb is restarted.")
+        else:
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_CONFIG, f, indent=1)
+            print(f"[fake] created {CONFIG_PATH}")
         cfg = dict(DEFAULT_CONFIG)
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=1)
-        print(f"[fake] created {CONFIG_PATH}")
     for k, v in DEFAULT_CONFIG.items():
         cfg.setdefault(k, v)
-    raw = _load_json(STATE_PATH, {})
-    if isinstance(raw, dict) and isinstance(raw.get("games"), dict):
+    try:
+        raw = _read_state()
+    except (OSError, ValueError) as e:             # refuse to play, so nothing overwrites the saves in that file
+        _blocked = True
+        raw = {}
+        print(f"[fake] WARNING: fake_state.json could not be read ({e}), so it was left as it is. "
+              f"Close anything that has it open, or repair it, then restart mitmweb.")
+    if isinstance(raw.get("games"), dict):
         state = raw["games"].get(_state_key()) or {}
     else:                                          # old single-game file
-        state = raw if isinstance(raw, dict) else {}
+        state = raw
         if state:
             shutil.copy(STATE_PATH, STATE_PATH + ".legacy")
             print(f"[fake] old-format fake_state.json adopted for {_state_key()} "
@@ -312,8 +341,12 @@ def _ensure_loaded():
     for p in sorted(glob.glob(os.path.join(HERE, "*.flow")), key=os.path.getmtime):   # oldest first
         pk = _flow_pkgs(p)
         if PKG and PKG in pk:
-            total += _learn(p)
             matched += 1
+            try:
+                total += _learn(p)
+            except Exception as e:                 # keep what was read, and go on to the next recording
+                print(f"[fake] WARNING: could not finish reading recording {os.path.basename(p)} ({e!r}). "
+                      f"Using the part before the damage. Record it again if something is missing.")
         else:
             why = ", ".join(sorted(pk)) or "no game detected"
             print(f"[fake] skipped recording {os.path.basename(p)} ({why})")
@@ -345,6 +378,19 @@ def _ensure_loaded():
     print(f"[fake] data dir: {data_dir} ({nfiles} files)")
     if not token_body or "050001" not in replies:
         print("[fake] WARNING: no login/profile found - capture a normal boot into a .flow file here first")
+
+
+def _ensure_loaded():
+    global _loaded, _blocked
+    if _loaded:
+        return
+    _loaded = True
+    try:
+        _load_all()
+    except Exception as e:                         # never carry on with half-loaded data
+        _blocked = True
+        print(f"[fake] ERROR while loading: {e!r}")
+        print("[fake] API and CDN requests will be refused until this is fixed and mitmweb is restarted.")
 
 
 def _profile():
