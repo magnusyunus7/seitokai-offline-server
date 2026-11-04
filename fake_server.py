@@ -4,7 +4,7 @@ Run it instead of plain mitmweb (same proxy setup as before):
 
     mitmweb --listen-port 8080 -s fake_server.py
 
-Put this file in your `captures` folder. What it does:
+Keep this file in the repo's root folder. What it does:
 
   * learns the server's replies from the *.flow recordings that belong to the
     configured game ("package" in fake_config.json)
@@ -200,8 +200,7 @@ def _pick_data_dir():
         return cfg["data_dir"]
     if not PKG:
         return None
-    cands = glob.glob(os.path.join(HERE, "..", "gamedata", "external", "data", PKG))
-    cands += glob.glob(os.path.join(HERE, "..", "snapshots", "*", "external", "data", PKG))
+    cands = glob.glob(os.path.join(HERE, "snapshots", "*", "external", "data", PKG))
     cands = [c for c in cands if os.path.isdir(c)]
     return max(cands, key=lambda d: len(os.listdir(d))) if cands else None
 

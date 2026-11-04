@@ -67,21 +67,23 @@ This is a personal preservation project, not affiliated with the publisher. It c
 The script finds its data relative to its own folder, so keep this layout. Items marked with asterisks (e.g. \*\*fake_state.json\*\*) are not in git.
 
 ```
-new_version/
-  captures/
-    fake_server.py              the add-on
-    fake_config.json            package, balances, data folder
-    **fake_state.json**         created at runtime: saves, balances, purchases
-    **<name>.flow**             your recordings (contain your login token)
-    **old_flows/**              recordings kept but ignored
-    **cdn_extra_<name>/**       CDN files recovered from recordings or the real CDN
+<repo>/
+  fake_server.py              the add-on
+  fake_config.json            package, balances, data folder
+  requirements.txt            Python packages for the venv
+  **venv/**                   your virtual environment
+  **fake_state.json**         created at runtime: saves, balances, purchases
+  **<name>.flow**             your recordings (contain your login token)
+  **cdn_extra_<name>/**       CDN files recovered from recordings or the real CDN
+
+Optional, create these only if you want them:
+  **old_flows/**              spare recordings, which the server doesn't read
   **snapshots/<snap>/external/data/<package>/**   game files pulled from a device
-  **gamedata/external/data/<package>/**           optional older pull
 ```
 
 Recordings for several games can share one folder. On startup the server works out which game each `.flow` belongs to and learns only the ones that match `package`, skipping the rest with a note. To switch games, change `package` in `fake_config.json` and restart mitmweb.
 
-If `data_dir` in the config is empty, the script picks the folder with the most files among `gamedata` and `snapshots`. With more than one game or snapshot, set `data_dir` explicitly.
+If `data_dir` in the config is empty, the script picks the snapshot with the most files. With more than one game or snapshot, set `data_dir` explicitly. With no data folder at all, files come from `cdn_extra_<name>` and the CDN fallback (see **The real-CDN fallback**).
 
 ## Finding a game's package name
 
@@ -103,7 +105,7 @@ The server needs the game's package name (for example `jp.interactive_studio.<na
    .\adb.exe shell ls /sdcard/Android/data
    ```
 
-Then set it in the config, and set `data_dir` to the matching snapshot folder:
+Then set it in the config. If you have a snapshot, you can also set `data_dir` to its folder:
 
 ```json
 { "package": "jp.interactive_studio.<name>" }
@@ -114,16 +116,16 @@ Then set it in the config, and set `data_dir` to the matching snapshot folder:
 The server answers the game's API only from your own recordings. Without a recording of a real first launch, the game cannot log in or get its profile, chapter list or file URLs, so this step cannot be skipped. You need it once per game, and it has to be done while the real server is still up.
 
 1. Install the game on the emulator and set up the proxy (see **Requirements**).
-2. In the `captures` folder, start a plain recording, without the add-on:
+2. In the repo's root folder, start a plain recording, without the add-on:
    ```powershell
    mitmweb --listen-port 8080 -w <name>.flow
    ```
 3. Open the game and pick the language you want to keep. Only recorded languages work later (see **Languages**). Record each game in its own mitmweb session, because a recording is assigned to the first game found in it.
 4. Close the game, then press Ctrl+C in the terminal so the file saves.
-5. Pull the game's data folder from the device into `snapshots/`, so the downloaded files are also kept locally. The destination folder must not exist yet:
+5. Optional, but recommended for keeping the game offline: pull the game's data folder from the device into `snapshots/`, so the downloaded files are also kept locally. The destination folder must not exist yet:
    ```powershell
    cd C:\LDPlayer\LDPlayer9
-   .\adb.exe pull /sdcard/Android/data/<package>/files "<repo>\new_version\snapshots\<snap>\external"
+   .\adb.exe pull /sdcard/Android/data/<package>/files "<repo>\snapshots\<snap>\external"
    ```
 6. Set `package` in `fake_config.json` and start the server (see **Daily use**).
 
@@ -152,7 +154,7 @@ The recording contains your login token and account ID, so keep it private and n
 
 ## Daily use
 
-1. Start the server, from `captures` with the venv active:
+1. Start the server, from the repo's root folder with the venv active:
    ```powershell
    mitmweb --listen-port 8080 -s fake_server.py
    ```
@@ -167,14 +169,14 @@ The recording contains your login token and account ID, so keep it private and n
    .\adb.exe shell settings put global http_proxy :0
    ```
 
-On the first game request the terminal prints the data folder and its file count (check it matches your snapshot) and the languages it learned.
+On the first game request the terminal prints how much it learned from your recordings, and the data folder with its file count. If you have a snapshot, check that the count matches it.
 
 ### Restoring the game's data folder
 
 Uninstalling the game, or using Android's **Clear storage** on it, deletes `/sdcard/Android/data/<package>/`. Push your snapshot back before the next launch:
 
 ```powershell
-$s="<repo>\new_version\snapshots\<snap>\external"; $p="<package>"
+$s="<repo>\snapshots\<snap>\external"; $p="<package>"
 cd C:\LDPlayer\LDPlayer9
 .\adb.exe push "$s\." /sdcard/Android/data/$p/files/
 .\adb.exe shell "find /sdcard/Android/data/$p/files -type f | wc -l"
@@ -196,7 +198,7 @@ Some games, such as After School Sparkles, have several seasons. To the server, 
 - **Each season keeps its own save,** stored as `<episode_id>:<slot>` in `fake_state.json` (see **State file**). Playing one season never moves or overwrites another, so you can switch freely in the game's season menu.
 - **A season you have not played yet starts fresh.** If the recording holds a save for that season, the game continues from it. Otherwise the game creates the season's save the first time it saves.
 - **Each season's files still have to come from somewhere.** A recording only holds the files downloaded while it was made, usually the first chapter of the season you picked. Files for the other seasons come from the data folder, `cdn_extra_<name>/` or the CDN fallback (see **The real-CDN fallback**). To keep every season locally, play each one once while the real CDN is up.
-- **Keep only one first-launch recording per game in `captures`.** When several recordings match the package, the server learns all of them and the newest reply wins for each command, which can mix seasons up. Keep spare recordings in `old_flows/`, which is ignored.
+- **Keep only one first-launch recording per game in the root folder.** When several recordings match the package, the server learns all of them and the newest reply wins for each command, which can mix seasons up. Keep spare recordings in `old_flows/`, which is ignored.
 
 ## What is emulated
 
@@ -226,7 +228,7 @@ When the game asks the CDN for a file the server does not have, the server can f
 
 | Step | Source | Notes |
 |---|---|---|
-| 1 | The game's data folder (`snapshots` or `gamedata`) | Files pulled from a device, named by hash |
+| 1 | The game's data folder (`data_dir`, or the largest snapshot in `snapshots`) | Files pulled from a device, named by hash. Skipped if you have none |
 | 2 | `cdn_extra_<name>/` | Files extracted from your `.flow` recordings on startup, plus anything the fallback cached |
 | 3 | The real CDN | If the CDN is still up, a 200 reply is saved to `cdn_extra_<name>/` |
 | 4 | A 404 | The game shows "Error while trying to access CDN server" and keeps loading |
@@ -248,7 +250,7 @@ The API side works the same way. API calls are never forwarded, so a command the
 
 ## State file
 
-`fake_state.json` is written by the script, with one section per game under `games`, named by package. Games never share saves, balances, purchases or unlocked chapters. An old single-game file is adopted for the current package on first run, and a backup is saved as `fake_state.json.legacy`. Do not edit the file while mitmweb is running, because the next save overwrites your edit.
+`fake_state.json` is written by the script, with one section per game under `games`, named by package. Games never share saves, balances, purchases or unlocked chapters. An old single-game file is adopted for the current package on first run, and a backup is saved as `fake_state.json.legacy`. Do not edit the file while mitmweb is running, because the next save overwrites your edit. If the file cannot be read, the server leaves it untouched instead of overwriting it (see **Troubleshooting**).
 
 | Key | Meaning |
 |---|---|
@@ -272,7 +274,7 @@ Everything the fake server knows came from real sessions recorded while the real
 
 1. In an emulator instance with the game's data cleared, run `mitmweb --listen-port 8080 -w <name>.flow` (without the script).
 2. Play the part that is missing. Let every download finish.
-3. Stop mitmweb with Ctrl+C so the file saves. Move it into `captures`.
+3. Stop mitmweb with Ctrl+C so the file saves. Move it into the repo's root folder.
 
 The first-launch recording is covered in **Before you start**. The same method fills later gaps: record the part that's missing, then pull the data folder again.
 
@@ -298,6 +300,10 @@ The first-launch recording is covered in **Before you start**. The same method f
 | Terminal says `no recording in this folder belongs to ...` | No first-launch recording exists for that game. Record one, or fix `package` |
 | `skipped recording <name> (...)` | Informational. That recording belongs to a different game |
 | `NOTE: old shared folder 'cdn_extra' found and ignored` | If its files belong to this game, rename it to the `cdn_extra_<name>` shown in the message |
+| `could not read fake_config.json, so it was left as it is` | The config has a mistake, such as a stray comma. Your file was not overwritten. Fix it and restart mitmweb |
+| `fake_state.json could not be read` on startup | Another program has it open, or the file is damaged. The game's requests are refused so your saves are not overwritten. Close that program or restore a backup, then restart mitmweb |
+| `could not finish reading recording <name>` | The recording is damaged or incomplete. The server uses the part before the damage. Record it again if something is missing |
+| `ERROR while loading` | Startup failed, for example because `data_dir` points to a folder that does not exist. The game's requests are refused. Fix the cause shown and restart mitmweb |
 | Game restarts at the language screen | Normal after clearing the app's data. Pick the language you recorded |
 | `Error while trying to access CDN server`, stuck loading | A file is missing. Check the terminal for `cdn MISSING` (see **The real-CDN fallback**) |
 
@@ -316,7 +322,8 @@ The first-launch recording is covered in **Before you start**. The same method f
 | Game returns to chapter 1 after closing | The saved chapter was overwritten. `050008` must only move progress forward, and `chapter_id` in the save must match the `data` blob |
 | Ad button loops forever | The ad hosts are not being blocked. Restart mitmweb and the game |
 | `REFUSED: language N was never recorded` | The game asked for a language that wasn't recorded (see **Languages**) |
-| Picking a season opens a different season | More than one recording for the game is in `captures`, or the saves come from an older version. Keep one first-launch recording, and on the first run check the terminal for `save for slot N moved to season ...` |
+| `did not save, because fake_state.json could not be read` | Another program has it open, or the file is damaged. Other games' saves are safe. Your progress stays in memory and is written by the next successful save, so close that program or repair the file before stopping mitmweb |
+| Picking a season opens a different season | More than one recording for the game is in the root folder, or the saves come from an older version. Keep one first-launch recording, and on the first run check the terminal for `save for slot N moved to season ...` |
 
 ## Doing this for another game from the same studio
 
@@ -329,21 +336,11 @@ Games from the studio share the same hosts and a very similar API, so the server
 
 ## Do not commit
 
-Keep these out of git. Recordings contain your login token and account ID, and the game files belong to the publisher.
+Recordings contain your login token and account ID, and the game files belong to the publisher, so they must stay out of git. This includes `*.flow`, `fake_state.json*`, `cdn_extra*/`, `old_flows/`, `snapshots/`, `*.apk`, `*.so` and `*.dat`.
 
-```
-__pycache__/
-*.flow
-fake_state.json*
-api_bodies/
-cdn_extra*/
-old_flows/
-snapshots/
-gamedata/
-*.apk
-*.so
-*.dat
-```
+`.gitignore` is an allow-list, so it covers all of these. Everything in the root folder is ignored unless it is named in that file. A new file that belongs in the repo needs its own `!/<name>` line.
+
+`fake_config.json` is tracked with a placeholder package. Stage files by name instead of using `git add .`, so your local package name stays out of your commits.
 
 ## Reverse-engineering notes
 
